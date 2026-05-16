@@ -1,22 +1,22 @@
 # JuMPConverter.jl
 
-[![Build Status](https://github.com/blegat/JuMPConverter.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/blegat/JuMPConverter.jl/actions?query=workflow%3ACI)
-[![codecov](https://codecov.io/gh/blegat/JuMPConverter.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/blegat/JuMPConverter.jl)
+[![Build Status](https://github.com/jump-dev/JuMPConverter.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jump-dev/JuMPConverter.jl/actions?query=workflow%3ACI)
+[![codecov](https://codecov.io/gh/jump-dev/JuMPConverter.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jump-dev/JuMPConverter.jl)
 
-[JuMPConverter.jl](https://github.com/blegat/JuMPConverter.jl) is a converter
+[JuMPConverter.jl](https://github.com/jump-dev/JuMPConverter.jl) is a converter
 for AMPL™ models in `.mod` or GAMS™ models in `.gmx` to [JuMP](https://github.com/jump-dev/JuMP.jl/)
 models in `.jl`.
 
 ## License
 
-`JuMPConverter.jl` is licensed under the [MIT License](https://github.com/blegat/JuMPConverter.jl/blob/main/LICENSE.md).
+`JuMPConverter.jl` is licensed under the [MIT License](https://github.com/jump-dev/JuMPConverter.jl/blob/main/LICENSE.md).
 
 ## Installation
 
 Install JuMPConverter as follows:
 ```julia
 import Pkg
-Pkg.add("https://github.com/blegat/JuMPConverter.jl")
+Pkg.add("https://github.com/jump-dev/JuMPConverter.jl")
 ```
 
 ## Use with JuMP
