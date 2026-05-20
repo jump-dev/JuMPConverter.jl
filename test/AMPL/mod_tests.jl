@@ -797,6 +797,42 @@ function test_conditional_expression_if_then_else()
     return
 end
 
+# --- Inline data sections ---
+# Six MacMPEC `.mod` files (sl1, bilevel2, bilevel2m, hs044-i, monteiro,
+# monteiroB) embed AMPL data inline via `data; ...`. The parser handles
+# `set N := 1 2 3;` after `data;` fine, but chokes on the tabular form
+# `param: <names> := <values>` — it dispatches `param` into `_parse_param!`,
+# which then expects an identifier and dies on the `:`.
+
+function test_inline_data_param_table()
+    # sl1.mod-style: `param: <names> := <values>` after `data;`.
+    mod = """
+    set I := 1..3;
+    param zl{I};
+    param zu{I};
+    var z{i in I} >= zl[i], <= zu[i];
+    minimize f: z[1];
+    subject to
+    c: z[1] >= 0;
+    data;
+    param: 		zl,	zu :=
+    \t1\t10\t1E10
+    \t2\t0.01\t10
+    \t3\t0\t1;
+    """
+    try
+        model = JuMPConverter.AMPL.parse_model(mod)
+        # The model side must still be captured.
+        @test haskey(model.parameters, "zl")
+        @test haskey(model.parameters, "zu")
+        @test haskey(model.variables, "z")
+        @test length(model.constraints) == 1
+    catch
+        @test_broken false
+    end
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()
