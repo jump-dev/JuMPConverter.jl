@@ -48,6 +48,14 @@ mutable struct Model
     variables::OrderedCollections.OrderedDict{String,Variable}
     objective::Union{Nothing,Objective}
     constraints::Vector{Constraint}
+    # Raw text of an inline `data; ...` section, if any. Embedded
+    # verbatim in the emitted `.jl` and re-parsed at load time so the
+    # values defined inline become defaults for `build_model`'s kwargs.
+    inline_data_text::Union{Nothing,String}
+    # Names of sets/parameters assigned in the inline `data;` section.
+    # Drives which kwargs of the emitted `build_model` get a default
+    # pulled from the inline data.
+    inline_data_names::OrderedCollections.OrderedSet{String}
     function Model()
         return new(
             OrderedCollections.OrderedDict{String,Set}(),
@@ -55,6 +63,8 @@ mutable struct Model
             OrderedCollections.OrderedDict{String,Variable}(),
             nothing,
             Constraint[],
+            nothing,
+            OrderedCollections.OrderedSet{String}(),
         )
     end
 end
