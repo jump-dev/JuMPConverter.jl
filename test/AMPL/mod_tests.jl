@@ -833,7 +833,10 @@ function test_inline_data_param_table()
     # The rendered .jl wires the inline data into the kwarg defaults so
     # `build_model()` works with no arguments.
     rendered = sprint(print, model)
-    @test contains(rendered, "const _INLINE_DATA = JuMPConverter.AMPL.parse_dat(")
+    @test contains(
+        rendered,
+        "const _INLINE_DATA = JuMPConverter.AMPL.parse_dat(",
+    )
     @test contains(rendered, "zl = _INLINE_DATA[\"zl\"]")
     @test contains(rendered, "zu = _INLINE_DATA[\"zu\"]")
     @test Meta.parseall(rendered) isa Expr
