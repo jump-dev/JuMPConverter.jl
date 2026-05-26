@@ -539,6 +539,9 @@ function clean_expression(expr::AbstractString)
     expr = replace(expr, "./" => ". /")
     # AMPL ranges use `..`; Julia uses `:`.
     expr = replace(expr, ".." => ":")
+    # AMPL uses bare `=` for equality constraints; JuMP requires `==`.
+    # Don't touch `<=`, `>=`, `:=`, `!=`, or an existing `==`.
+    expr = replace(expr, r"(?<![<>:!=])=(?!=)" => "==")
     expr = _convert_complementarity(expr)
     return expr
 end
