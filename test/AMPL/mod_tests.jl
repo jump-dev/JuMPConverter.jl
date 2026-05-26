@@ -797,6 +797,52 @@ function test_conditional_expression_if_then_else()
     return
 end
 
+# --- Inline data sections ---
+# Some AMPL `.mod` files embed parameter / set values inline via
+# `data; ...` rather than keeping them in a separate `.dat`. The parser
+# must capture that text and the generated kwargs must use the inline
+# values as defaults — otherwise the params show up as required kwargs
+# even though their values are literally in the source file.
+
+function test_inline_data_param_table()
+    # `param: <names> := <values>` after `data;` — the tabular form.
+    mod = """
+    set I := 1..3;
+    param zl{I};
+    param zu{I};
+    var z{i in I} >= zl[i], <= zu[i];
+    minimize f: z[1];
+    subject to
+    c: z[1] >= 0;
+    data;
+    param: 		zl,	zu :=
+    \t1\t10\t1E10
+    \t2\t0.01\t10
+    \t3\t0\t1;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    # The model side parsed normally.
+    @test haskey(model.parameters, "zl")
+    @test haskey(model.parameters, "zu")
+    @test haskey(model.variables, "z")
+    @test length(model.constraints) == 1
+    # The data section was captured and the names recorded.
+    @test model.inline_data_text !== nothing
+    @test "zl" in model.inline_data_names
+    @test "zu" in model.inline_data_names
+    # The rendered .jl wires the inline data into the kwarg defaults so
+    # `build_model()` works with no arguments.
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "const _INLINE_DATA = JuMPConverter.AMPL.parse_dat(",
+    )
+    @test contains(rendered, "zl = _INLINE_DATA[\"zl\"]")
+    @test contains(rendered, "zu = _INLINE_DATA[\"zu\"]")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()

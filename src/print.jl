@@ -57,11 +57,15 @@ end
 # precedence than `+`, so `1..3+H` becomes `1:3+H` (= `1:(3+H)`).
 _ampl_range_to_julia(s::AbstractString) = replace(s, ".." => ":")
 
-# Build the keyword-argument fragment for a parameter. For an indexed
-# parameter with a default (e.g. `param ALPHA{K} default 1.`) the default
-# must be a container indexable by the parameter's axes, otherwise
-# `ALPHA[k]` fails because the default is a scalar.
-function _format_param_kwarg(p::Parameter)
+# Build the keyword-argument fragment for a parameter. Precedence for
+# the default value: inline `data;` value > explicit `default <expr>` in
+# the `.mod` > none (i.e. required kwarg). For an indexed parameter with
+# a scalar default the default must be wrapped in a container indexable
+# by the parameter's axes, otherwise `ALPHA[k]` fails on a scalar.
+function _format_param_kwarg(p::Parameter, inline::Bool)
+    if inline
+        return "$(p.name) = _INLINE_DATA[\"$(p.name)\"]"
+    end
     isnothing(p.default) && return p.name
     if isnothing(p.axes)
         return "$(p.name) = $(p.default)"
@@ -70,6 +74,13 @@ function _format_param_kwarg(p::Parameter)
     lengths = join(["length($a)" for a in axes_strs], ", ")
     fill_call = "fill($(p.default), $lengths)"
     return "$(p.name) = JuMP.Containers.DenseAxisArray($fill_call, $(join(axes_strs, ", ")))"
+end
+
+function _format_set_kwarg(s::Set, inline::Bool)
+    if inline
+        return "$(s.name) = _INLINE_DATA[\"$(s.name)\"]"
+    end
+    return isnothing(s.default) ? s.name : "$(s.name) = $(s.default)"
 end
 
 function Base.show(io::IO, objective::Objective)
@@ -93,16 +104,19 @@ end
 
 function Base.show(io::IO, model::JuMPConverter.Model)
     println(io, "using JuMP")
+    has_data_loader = !isempty(model.parameters) || !isempty(model.sets)
+    inline = model.inline_data_names
+    if !isnothing(model.inline_data_text)
+        _print_inline_data_const(io, model)
+        println(io)
+    end
     print(io, "function build_model(")
     kwargs = String[]
     for s in values(model.sets)
-        push!(
-            kwargs,
-            isnothing(s.default) ? s.name : "$(s.name) = $(s.default)",
-        )
+        push!(kwargs, _format_set_kwarg(s, s.name in inline))
     end
     for p in values(model.parameters)
-        push!(kwargs, _format_param_kwarg(p))
+        push!(kwargs, _format_param_kwarg(p, p.name in inline))
     end
     if !isempty(kwargs)
         print(io, "; ")
@@ -119,11 +133,26 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     println(io, "    ", model.objective)
     println(io, "    return model")
     print(io, "end")
-    if !isempty(model.parameters) || !isempty(model.sets)
+    if has_data_loader
         println(io)
         println(io)
         _print_data_loader(io, model)
     end
+    return
+end
+
+# Emit `const _INLINE_DATA = JuMPConverter.AMPL.parse_dat("…")` so the
+# inline `data;` section becomes a Dict the generated kwargs can
+# reference as their defaults. Re-parsed once at .jl load time.
+# Schemaless on purpose: the schema-aware `parse_dat` has rough edges
+# with set-of-tuples and multi-column tables that the schemaless path
+# happens to handle for the inline-data forms we've seen.
+function _print_inline_data_const(io::IO, model::JuMPConverter.Model)
+    println(io, "const _INLINE_DATA = JuMPConverter.AMPL.parse_dat(")
+    # `raw"…"` would fail on a trailing backslash or an embedded `"`,
+    # so escape with `repr` to get a safe Julia string literal.
+    println(io, "    ", repr(model.inline_data_text), ",")
+    println(io, ")")
     return
 end
 
@@ -134,22 +163,9 @@ end
 # at runtime without re-parsing the `.mod`.
 function _print_data_loader(io::IO, model::JuMPConverter.Model)
     println(io, "function build_model(path::String)")
-    println(io, "    schema = JuMPConverter.AMPL.DatSchema(")
-    println(io, "        Dict{Symbol,Int}(")
-    for (name, p) in model.parameters
-        nd = isnothing(p.axes) ? 0 : length(p.axes.axes)
-        println(io, "            :$name => $nd,")
-    end
-    print(io, "        )")
-    if !isempty(model.sets)
-        println(io, ",")
-        print(io, "        [")
-        join(io, (":$n" for n in keys(model.sets)), ", ")
-        println(io, "],")
-    else
-        println(io)
-    end
-    println(io, "    )")
+    print(io, "    schema = ")
+    _print_schema_expr(io, model; indent = "    ")
+    println(io)
     println(io, "    data = if isdir(path)")
     println(io, "        JuMPConverter.AMPL.read_csv(path, schema)")
     println(io, "    else")
@@ -157,5 +173,32 @@ function _print_data_loader(io::IO, model::JuMPConverter.Model)
     println(io, "    end")
     println(io, "    return build_model(; data...)")
     print(io, "end")
+    return
+end
+
+# `JuMPConverter.AMPL.DatSchema(Dict{Symbol,Int}(…), [:S1, :S2])`
+# rendered as a multi-line expression. `indent` is the prefix for the
+# closing `)` so the caller can align it with surrounding code.
+function _print_schema_expr(
+    io::IO,
+    model::JuMPConverter.Model;
+    indent::AbstractString = "",
+)
+    println(io, "JuMPConverter.AMPL.DatSchema(")
+    println(io, indent, "    Dict{Symbol,Int}(")
+    for (name, p) in model.parameters
+        nd = isnothing(p.axes) ? 0 : length(p.axes.axes)
+        println(io, indent, "        :$name => $nd,")
+    end
+    print(io, indent, "    )")
+    if !isempty(model.sets)
+        println(io, ",")
+        print(io, indent, "    [")
+        join(io, (":$n" for n in keys(model.sets)), ", ")
+        println(io, "],")
+    else
+        println(io)
+    end
+    print(io, indent, ")")
     return
 end

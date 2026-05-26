@@ -493,6 +493,23 @@ function parse_model(mod::AbstractString)
             read_token!(lex)
             # Skip check statements
             _read_expression!(lex, (TOKEN_SEMICOLON,))
+        elseif kw == "data"
+            # Switch to AMPL's data section: everything from here to EOF
+            # is values for already-declared params/sets, not model code.
+            # Capture the raw text so the emitted `.jl` can re-parse it
+            # at load time and use the values as kwarg defaults.
+            read_token!(lex)               # `data`
+            expect!(lex, TOKEN_SEMICOLON)  # AMPL requires `data;`
+            text = lex.input[lex.pos:end]
+            model.inline_data_text = text
+            # Parse without a schema: `_dat_parse_multi_column!` has
+            # rough edges with set-of-tuples indexing and multi-column
+            # tables that the schemaless path sidesteps. We only need
+            # the names here, so the looser typing is fine.
+            for name in keys(parse_dat(text))
+                push!(model.inline_data_names, name)
+            end
+            return model
         elseif _is_keyword(kw)
             # Other keywords: skip until semicolon
             read_token!(lex)
