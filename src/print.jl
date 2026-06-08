@@ -118,14 +118,30 @@ function _print_fix(
         "model[:$(fx.variable)][$(_format_indices(fx.indices))]"
     end
     if fx.iter === nothing
-        println(io, indent, "JuMP.fix(", target, ", ", value_expr, "; force = true)")
+        println(
+            io,
+            indent,
+            "JuMP.fix(",
+            target,
+            ", ",
+            value_expr,
+            "; force = true)",
+        )
         return
     end
     set_src =
         fx.iter.set isa Symbol ? string(fx.iter.set) :
         "$(fx.iter.set.start):$(fx.iter.set.stop)"
     println(io, indent, "for ", fx.iter.var, " in ", set_src)
-    println(io, indent, "    JuMP.fix(", target, ", ", value_expr, "; force = true)")
+    println(
+        io,
+        indent,
+        "    JuMP.fix(",
+        target,
+        ", ",
+        value_expr,
+        "; force = true)",
+    )
     println(io, indent, "end")
     return
 end
@@ -229,8 +245,10 @@ function _print_data_loader(io::IO, model::JuMPConverter.Model)
     print(io, "        kw in (")
     join(
         io,
-        (":$(JuMPConverter.AMPL.fix_kwarg_name(fx))" for
-         fx in model.parametric_fixes),
+        (
+            ":$(JuMPConverter.AMPL.fix_kwarg_name(fx))" for
+            fx in model.parametric_fixes
+        ),
         ", ",
     )
     println(io, ") || error(")

@@ -429,8 +429,7 @@ function _parse_fix!(lex::Lexer)
         # nothing to pin at build time.
         @warn "skipping `fix` without `:=` (no value to pin)" variable
         # Skip to the terminating semicolon.
-        while peek(lex).kind != TOKEN_SEMICOLON &&
-                  peek(lex).kind != TOKEN_EOF
+        while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
             read_token!(lex)
         end
         return nothing
@@ -482,7 +481,6 @@ function _parse_fix_number!(lex::Lexer)
     end
     return sign * parse(Float64, expect!(lex, TOKEN_NUMBER).value)
 end
-
 
 function _is_keyword(value::AbstractString)
     return value in (
