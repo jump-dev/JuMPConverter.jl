@@ -711,6 +711,43 @@ function test_dat_to_csv_long_form_for_3d()
     return
 end
 
+function test_dat_to_csv_multi_column_named_table()
+    # `param NAME: c1 c2 := …` (named multi-column form) keeps the
+    # whole block as a DataFrame in the data dict, exercising the
+    # DataFrame branch of `_write_csv_value` — written as a labeled
+    # matrix CSV with the column headers preserved.
+    mod = """
+    set I;
+    param T {I, I};
+    var x {I} >= 0;
+    minimize obj: sum {i in I} x[i];
+    s.t. c {i in I}: x[i] >= 0;
+    """
+    dat = """
+    set I := a b c;
+    param T:  a  b  c :=
+    a         1  2  3
+    b         4  5  6
+    c         7  8  9 ;
+    """
+    mktempdir() do dir
+        mod_path = joinpath(dir, "m.mod")
+        dat_path = joinpath(dir, "m.dat")
+        write(mod_path, mod)
+        write(dat_path, dat)
+        model = JuMPConverter.AMPL.read_model(mod_path)
+        csv_dir = joinpath(dir, "csvs")
+        JuMPConverter.AMPL.dat_to_csv(dat_path, model, csv_dir)
+        T_csv = read(joinpath(csv_dir, "T.csv"), String)
+        # Header row carries the column labels from the `:` line; row
+        # labels come from the first column of each data row.
+        @test startswith(T_csv, "index,a,b,c\n")
+        @test occursin("\na,1.0,2.0,3.0\n", T_csv)
+        @test occursin("\nc,7.0,8.0,9.0", T_csv)
+    end
+    return
+end
+
 end  # module
 
 TestDatParsing.runtests()

@@ -662,12 +662,10 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
             # the matching `fix_<…>` kwarg.
             read_token!(lex)
             fx = _parse_fix!(lex)
-            if fx !== nothing
-                fixes = get!(data, "fixes") do
-                    return JuMPConverter.FixStatement[]
-                end
-                push!(fixes, fx)
+            fixes = get!(data, "fixes") do
+                return JuMPConverter.FixStatement[]
             end
+            push!(fixes, fx)
         elseif kw == "for" || kw == "if"
             read_token!(lex)
             depth = 0
