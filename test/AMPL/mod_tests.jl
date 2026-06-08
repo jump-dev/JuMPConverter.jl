@@ -528,7 +528,7 @@ function test_set_declaration()
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0.0, length(PRODUCTS)), PRODUCTS))",
+        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0.0, length(PRODUCTS)), PRODUCTS), fixes = JuMPConverter.FixStatement[])",
     )
     return
 end
@@ -549,7 +549,7 @@ function test_set_with_default_is_optional_kwarg()
     @test model.sets["N"].default == "1:2"
     @test model.sets["T"].default === nothing
     rendered = sprint(print, model)
-    @test contains(rendered, "build_model(; T, N = 1:2)")
+    @test contains(rendered, "build_model(; T, N = 1:2, fixes = JuMPConverter.FixStatement[])")
     return
 end
 
@@ -839,6 +839,59 @@ function test_inline_data_param_table()
     )
     @test contains(rendered, "zl = _INLINE_DATA[\"zl\"]")
     @test contains(rendered, "zu = _INLINE_DATA[\"zu\"]")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+# --- AMPL `fix VAR := VAL;` ---
+
+function test_model_level_fix_scalar()
+    # Scalar fix on a model variable (taxmcp-style).
+    mod = """
+    var PL >= 0;
+    minimize obj: PL;
+    fix PL := 1;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test length(model.fixes) == 1
+    fx = model.fixes[1]
+    @test fx.iter === nothing
+    @test fx.variable === :PL
+    @test isempty(fx.indices)
+    @test fx.value == 1.0
+    rendered = sprint(print, model)
+    @test contains(rendered, "JuMP.fix(model[:PL], 1.0; force = true)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_model_level_fix_indexed_with_iter_and_string()
+    # Indexed fix with iteration and string-literal indices (bar-truss
+    # style, lifted into the model section so parse_model sees it).
+    # Verifies that the lexer now distinguishes `'y1'` from a bare
+    # identifier so it round-trips as a Julia string.
+    mod = """
+    set m;
+    set y;
+    var H{m, y, y};
+    minimize obj: sum {i in m} H[i, 'y1', 'y1'];
+    fix{i in m} H[i, 'y1', 'y2'] := 0.0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test length(model.fixes) == 1
+    fx = model.fixes[1]
+    @test fx.iter !== nothing
+    @test fx.iter.var === :i
+    @test fx.iter.set === :m
+    @test fx.variable === :H
+    @test fx.indices == Any[:i, "y1", "y2"]
+    @test fx.value == 0.0
+    rendered = sprint(print, model)
+    @test contains(rendered, "for i in m")
+    @test contains(
+        rendered,
+        "JuMP.fix(model[:H][i, \"y1\", \"y2\"], 0.0; force = true)",
+    )
     @test Meta.parseall(rendered) isa Expr
     return
 end

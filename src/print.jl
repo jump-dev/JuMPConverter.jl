@@ -102,6 +102,34 @@ function Base.show(io::IO, constraint::Constraint)
     return
 end
 
+# AMPL `fix [{ITER}] VAR[idx, …] := VALUE;` → an inline `JuMP.fix(...)`
+# call, wrapped in a `for ITER` loop when iter is set.
+function _print_fix(io::IO, fx::FixStatement, indent::AbstractString)
+    target = if isempty(fx.indices)
+        "model[:$(fx.variable)]"
+    else
+        "model[:$(fx.variable)][$(_format_indices(fx.indices))]"
+    end
+    if fx.iter === nothing
+        println(io, indent, "JuMP.fix(", target, ", ", fx.value, "; force = true)")
+        return
+    end
+    set_src =
+        fx.iter.set isa Symbol ? string(fx.iter.set) :
+        "$(fx.iter.set.start):$(fx.iter.set.stop)"
+    println(io, indent, "for ", fx.iter.var, " in ", set_src)
+    println(io, indent, "    JuMP.fix(", target, ", ", fx.value, "; force = true)")
+    println(io, indent, "end")
+    return
+end
+
+# Symbols (an iter var like `:i`) emit bare so they refer to the for-loop
+# binding; literals (numbers / strings) emit as Julia source literals.
+_format_index(i::Symbol) = string(i)
+_format_index(i) = repr(i)
+
+_format_indices(idxs) = join((_format_index(i) for i in idxs), ", ")
+
 function Base.show(io::IO, model::JuMPConverter.Model)
     println(io, "using JuMP")
     has_data_loader = !isempty(model.parameters) || !isempty(model.sets)
@@ -118,10 +146,9 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     for p in values(model.parameters)
         push!(kwargs, _format_param_kwarg(p, p.name in inline))
     end
-    if !isempty(kwargs)
-        print(io, "; ")
-        join(io, kwargs, ", ")
-    end
+    push!(kwargs, "fixes = JuMPConverter.FixStatement[]")
+    print(io, "; ")
+    join(io, kwargs, ", ")
     println(io, ")")
     println(io, "    model = Model()")
     for variable in values(model.variables)
@@ -131,6 +158,10 @@ function Base.show(io::IO, model::JuMPConverter.Model)
         println(io, "    ", constraint)
     end
     println(io, "    ", model.objective)
+    for fx in model.fixes
+        _print_fix(io, fx, "    ")
+    end
+    _print_runtime_fix_loop(io, model)
     println(io, "    return model")
     print(io, "end")
     if has_data_loader
@@ -138,6 +169,26 @@ function Base.show(io::IO, model::JuMPConverter.Model)
         println(io)
         _print_data_loader(io, model)
     end
+    return
+end
+
+# Apply runtime `fixes` (data-section fixes parsed at load time) via
+# `apply_fix!`, passing a NamedTuple of every set / parameter that's
+# in scope so the helper can resolve iter sources (`i in m`) and index
+# references without `eval`.
+function _print_runtime_fix_loop(io::IO, model::JuMPConverter.Model)
+    println(io, "    for fx in fixes")
+    print(io, "        JuMPConverter.AMPL.apply_fix!(model, fx, (;")
+    names = String[]
+    for n in keys(model.sets)
+        push!(names, " $n")
+    end
+    for n in keys(model.parameters)
+        push!(names, " $n")
+    end
+    join(io, names, ",")
+    println(io, "))")
+    println(io, "    end")
     return
 end
 
@@ -171,6 +222,8 @@ function _print_data_loader(io::IO, model::JuMPConverter.Model)
     println(io, "    else")
     println(io, "        JuMPConverter.AMPL.read_dat(path, schema)")
     println(io, "    end")
+    # `parse_dat` returns `fix` statements under `:fixes`; the kwarg
+    # build_model splats it through as `fixes` and applies them.
     println(io, "    return build_model(; data...)")
     print(io, "end")
     return

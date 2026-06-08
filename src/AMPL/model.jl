@@ -104,7 +104,7 @@ function _read_expression!(lex::Lexer, stops::NTuple{N,TokenKind}) where {N}
             continue
         end
         read_token!(lex)
-        val = t.value
+        val = emit_token(t)
         # Insert spacing intelligently
         if !isempty(parts) && _needs_space(prev_kind, t.kind)
             push!(parts, " ")
@@ -403,6 +403,113 @@ function _parse_constraint!(lex::Lexer, model::JuMPConverter.Model)
     return
 end
 
+# Parse `fix [{ITER}] VAR[idx, …] := VALUE;` into a structured
+# `FixStatement`. Used by both `parse_model` (model-section fix in the
+# .mod) and `parse_dat` (fix in a data section / .dat file).
+function _parse_fix!(lex::Lexer)
+    iter = nothing
+    if peek(lex).kind == TOKEN_LBRACE
+        read_token!(lex)  # consume `{`
+        iter = _parse_fix_iter!(lex)
+    end
+    variable = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    indices = Any[]
+    if peek(lex).kind == TOKEN_LBRACKET
+        read_token!(lex)
+        while peek(lex).kind != TOKEN_RBRACKET
+            push!(indices, _parse_fix_index!(lex))
+            if peek(lex).kind == TOKEN_COMMA
+                read_token!(lex)
+            end
+        end
+        read_token!(lex)  # consume `]`
+    end
+    if peek(lex).kind != TOKEN_ASSIGN
+        # `fix VAR;` without `:= VALUE` would pin to the current value;
+        # nothing to pin at build time.
+        @warn "skipping `fix` without `:=` (no value to pin)" variable
+        # Skip to the terminating semicolon.
+        while peek(lex).kind != TOKEN_SEMICOLON &&
+                  peek(lex).kind != TOKEN_EOF
+            read_token!(lex)
+        end
+        return nothing
+    end
+    read_token!(lex)  # consume `:=`
+    value = _parse_fix_number!(lex)
+    return JuMPConverter.FixStatement(; variable, indices, value, iter)
+end
+
+function _parse_fix_iter!(lex::Lexer)
+    var = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    in_tok = expect!(lex, TOKEN_IDENTIFIER)
+    in_tok.value == "in" ||
+        error("expected `in` after fix iter variable, got `$(in_tok.value)`")
+    t = peek(lex)
+    set = if t.kind == TOKEN_NUMBER
+        lo = parse(Int, read_token!(lex).value)
+        expect!(lex, TOKEN_DOTDOT)
+        hi = parse(Int, expect!(lex, TOKEN_NUMBER).value)
+        lo:hi
+    else
+        Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    end
+    expect!(lex, TOKEN_RBRACE)
+    return JuMPConverter.FixIter(; var, set)
+end
+
+function _parse_fix_index!(lex::Lexer)
+    t = read_token!(lex)
+    if t.kind == TOKEN_NUMBER
+        n = tryparse(Int, t.value)
+        return n === nothing ? parse(Float64, t.value) : n
+    elseif t.kind == TOKEN_STRING
+        return t.value
+    elseif t.kind == TOKEN_IDENTIFIER
+        return Symbol(t.value)
+    elseif t.kind == TOKEN_MINUS
+        n_tok = expect!(lex, TOKEN_NUMBER)
+        return -parse(Float64, n_tok.value)
+    end
+    return error("unexpected token in fix index: $(t.kind) `$(t.value)`")
+end
+
+function _parse_fix_number!(lex::Lexer)
+    sign = 1
+    if peek(lex).kind == TOKEN_MINUS
+        read_token!(lex)
+        sign = -1
+    end
+    return sign * parse(Float64, expect!(lex, TOKEN_NUMBER).value)
+end
+
+# Apply a runtime-parsed `FixStatement` against a built JuMP model.
+# `sets` is a NamedTuple carrying every set/param kwarg of `build_model`
+# so that an iter source like `i in m` and an index like `[i]` can
+# resolve `m` without `eval`.
+function apply_fix!(
+    model::JuMPConverter.JuMP.Model,
+    fx::JuMPConverter.FixStatement,
+    sets::NamedTuple,
+)
+    var = model[fx.variable]
+    if fx.iter === nothing
+        target = isempty(fx.indices) ? var : var[fx.indices...]
+        JuMPConverter.JuMP.fix(target, fx.value; force = true)
+        return
+    end
+    set = fx.iter.set isa Symbol ? sets[fx.iter.set] : fx.iter.set
+    for i in set
+        resolved = Any[
+            idx isa Symbol && idx == fx.iter.var ? i : idx for
+            idx in fx.indices
+        ]
+        target = isempty(resolved) ? var : var[resolved...]
+        JuMPConverter.JuMP.fix(target, fx.value; force = true)
+    end
+    return
+end
+
 function _is_keyword(value::AbstractString)
     return value in (
         "param",
@@ -493,6 +600,10 @@ function parse_model(mod::AbstractString)
             read_token!(lex)
             # Skip check statements
             _read_expression!(lex, (TOKEN_SEMICOLON,))
+        elseif kw == "fix"
+            read_token!(lex)
+            fx = _parse_fix!(lex)
+            fx === nothing || push!(model, fx)
         elseif kw == "data"
             # Switch to AMPL's data section: everything from here to EOF
             # is values for already-declared params/sets, not model code.

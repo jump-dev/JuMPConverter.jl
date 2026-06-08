@@ -8,6 +8,7 @@ Inspired by MathOptInterface/src/FileFormats/LP/read.jl.
 @enum(
     TokenKind,
     TOKEN_IDENTIFIER,  # foo, x1, _bar
+    TOKEN_STRING,      # 'foo' or "foo" — AMPL string literal
     TOKEN_NUMBER,      # 42, 3.14, 1e-7, -5
     TOKEN_SEMICOLON,   # ;
     TOKEN_COLON,       # :
@@ -264,7 +265,7 @@ function _read_string!(lex::Lexer, quote_char::Char)
     if lex.pos <= ncodeunits(lex.input)
         lex.pos += 1  # consume closing quote (always ASCII)
     end
-    return Token(TOKEN_IDENTIFIER, val)
+    return Token(TOKEN_STRING, val)
 end
 
 """
@@ -373,11 +374,17 @@ function read_balanced!(
         if !isempty(parts) && _needs_space(prev_kind, t.kind; compact)
             push!(parts, " ")
         end
-        push!(parts, t.value)
+        push!(parts, emit_token(t))
         prev_kind = t.kind
     end
     return join(parts)
 end
+
+# AMPL string literals (`'foo'` / `"foo"`) come through the lexer as
+# `TOKEN_STRING`; when echoed back into a Julia expression they must be
+# quoted so the emitted code references them as `String`s (e.g. a
+# set member used as an index) rather than as bare identifiers.
+emit_token(t::Token) = t.kind == TOKEN_STRING ? repr(t.value) : t.value
 
 const _ARITH_OPS = (
     TOKEN_PLUS,

@@ -42,12 +42,37 @@ Base.@kwdef struct Constraint
     expression::String
 end
 
+# AMPL `fix [{ITER}] VAR[idx, …] := VALUE;` parsed into structured
+# pieces so the emitter (and the runtime helper) can apply it via
+# `JuMP.fix(model[:VAR][idx…], VALUE; force = true)` without ever
+# needing to `eval` a string.
+#
+# `indices` entries are one of:
+#   * an `Int` / `Float64` literal,
+#   * a `String` (from AMPL `'foo'`),
+#   * a `Symbol` referring to `iter.var`.
+# `iter.set` is either a `Symbol` (look up by name in the caller's
+# sets/params) or a literal `UnitRange{Int}`.
+Base.@kwdef struct FixIter
+    var::Symbol
+    set::Union{Symbol,UnitRange{Int}}
+end
+
+Base.@kwdef struct FixStatement
+    variable::Symbol
+    indices::Vector{Any} = Any[]
+    value::Float64
+    iter::Union{Nothing,FixIter} = nothing
+end
+
 mutable struct Model
     sets::OrderedCollections.OrderedDict{String,Set}
     parameters::OrderedCollections.OrderedDict{String,Parameter}
     variables::OrderedCollections.OrderedDict{String,Variable}
     objective::Union{Nothing,Objective}
     constraints::Vector{Constraint}
+    # AMPL `fix` statements seen in the `.mod`'s model section.
+    fixes::Vector{FixStatement}
     # Raw text of an inline `data; ...` section, if any. Embedded
     # verbatim in the emitted `.jl` and re-parsed at load time so the
     # values defined inline become defaults for `build_model`'s kwargs.
@@ -63,6 +88,7 @@ mutable struct Model
             OrderedCollections.OrderedDict{String,Variable}(),
             nothing,
             Constraint[],
+            FixStatement[],
             nothing,
             OrderedCollections.OrderedSet{String}(),
         )
@@ -86,5 +112,10 @@ end
 
 function Base.push!(model::Model, constraint::Constraint)
     push!(model.constraints, constraint)
+    return model
+end
+
+function Base.push!(model::Model, fix::FixStatement)
+    push!(model.fixes, fix)
     return model
 end

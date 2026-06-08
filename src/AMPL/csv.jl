@@ -1,4 +1,5 @@
 import CSV
+import DataFrames
 
 # ============================================================
 # CSV writers: dispatched on the value type returned by `read_dat`.
@@ -114,6 +115,20 @@ function _write_csv_value(path::String, v::AbstractArray)
     return
 end
 
+# `read_dat` returns multi-column `param: c1 c2 := …` blocks as a
+# DataFrame whose first column is the row index and remaining columns
+# are the data columns — exactly the labeled-matrix layout. Missing
+# cells (AMPL `.`) become empty CSV cells so the reader sees them as
+# absent rather than the literal string "missing".
+function _write_csv_value(path::String, v::DataFrames.DataFrame)
+    rows = v[:, 1]
+    cols = DataFrames.names(v)[2:end]
+    cell = (i, j) -> let x = v[i, j+1]
+        x === missing ? "" : x
+    end
+    return _write_labeled_matrix(path, rows, cols, cell)
+end
+
 function _write_csv_value(path::String, v::JuMP.Containers.SparseAxisArray)
     isempty(v.data) && return
     N = length(first(keys(v.data)))
@@ -156,6 +171,9 @@ function dat_to_csv(dat_path::String, schema::DatSchema, out_dir::String)
     isdir(out_dir) || mkpath(out_dir)
     data = read_dat(dat_path, schema)
     for (name, value) in data
+        # `:fixes` is a meta-entry (Vector{FixStatement}) carried
+        # alongside data values; no CSV representation makes sense.
+        name === :fixes && continue
         _write_csv_value(joinpath(out_dir, string(name) * ".csv"), value)
     end
     return out_dir

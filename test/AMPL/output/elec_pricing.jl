@@ -28,6 +28,7 @@ function build_model(;
         1:X,
         1:(3+H),
     ),
+    fixes = JuMPConverter.FixStatement[],
 )
     model = Model()
     @variable(model, 0 <= xx[w in 1:W, h in 1:H] <= 1)
@@ -67,6 +68,13 @@ function build_model(;
         sum(rho[s] * (2.0 / beta[s] * y[s, 0] - mu[s]) for s in 1:S) -
         10 * sum(eta[w] for w in 1:W)
     )
+    for fx in fixes
+        JuMPConverter.AMPL.apply_fix!(
+            model,
+            fx,
+            (; S, W, H, X, rho, beta, alpha, E, C, R, polyX),
+        )
+    end
     return model
 end
 
