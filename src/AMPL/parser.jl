@@ -656,6 +656,10 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
                 _dat_parse_param!(lex, data, schema)
             end
         elseif kw == "fix"
+            # Data-section `fix VAR := V;` modifies model variables, not
+            # data values. Stash structured fixes under `"fixes"` so the
+            # generated `build_model(path::String)` can route them onto
+            # the matching `fix_<…>` kwarg.
             read_token!(lex)
             fx = _parse_fix!(lex)
             if fx !== nothing

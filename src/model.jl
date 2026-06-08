@@ -71,8 +71,14 @@ mutable struct Model
     variables::OrderedCollections.OrderedDict{String,Variable}
     objective::Union{Nothing,Objective}
     constraints::Vector{Constraint}
-    # AMPL `fix` statements seen in the `.mod`'s model section.
+    # AMPL `fix` statements seen in the `.mod`'s model section — values
+    # are known at codegen time and emitted as inline `JuMP.fix(...)`.
     fixes::Vector{FixStatement}
+    # Data-section `fix` *structures* (variable + indices + iter, no
+    # value) discovered from an example `.dat`. Each becomes a
+    # `fix_<…> = nothing` kwarg of the generated `build_model`; passing
+    # a value applies the fix, leaving it `nothing` skips.
+    parametric_fixes::Vector{FixStatement}
     # Raw text of an inline `data; ...` section, if any. Embedded
     # verbatim in the emitted `.jl` and re-parsed at load time so the
     # values defined inline become defaults for `build_model`'s kwargs.
@@ -88,6 +94,7 @@ mutable struct Model
             OrderedCollections.OrderedDict{String,Variable}(),
             nothing,
             Constraint[],
+            FixStatement[],
             FixStatement[],
             nothing,
             OrderedCollections.OrderedSet{String}(),

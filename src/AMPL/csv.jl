@@ -171,9 +171,6 @@ function dat_to_csv(dat_path::String, schema::DatSchema, out_dir::String)
     isdir(out_dir) || mkpath(out_dir)
     data = read_dat(dat_path, schema)
     for (name, value) in data
-        # `:fixes` is a meta-entry (Vector{FixStatement}) carried
-        # alongside data values; no CSV representation makes sense.
-        name === :fixes && continue
         _write_csv_value(joinpath(out_dir, string(name) * ".csv"), value)
     end
     return out_dir

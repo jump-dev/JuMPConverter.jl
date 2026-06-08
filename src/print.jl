@@ -102,23 +102,30 @@ function Base.show(io::IO, constraint::Constraint)
     return
 end
 
-# AMPL `fix [{ITER}] VAR[idx, …] := VALUE;` → an inline `JuMP.fix(...)`
-# call, wrapped in a `for ITER` loop when iter is set.
-function _print_fix(io::IO, fx::FixStatement, indent::AbstractString)
+# AMPL `fix [{ITER}] VAR[idx, …] := <something>;` → `JuMP.fix(...)`,
+# wrapped in a `for ITER` loop when iter is set. `value_expr` is the
+# Julia source for the fix's right-hand side: a literal (`"1.0"`) for
+# inline fixes, a kwarg name (`"fix_H_y1_y2"`) for parametric ones.
+function _print_fix(
+    io::IO,
+    fx::FixStatement,
+    indent::AbstractString,
+    value_expr::AbstractString,
+)
     target = if isempty(fx.indices)
         "model[:$(fx.variable)]"
     else
         "model[:$(fx.variable)][$(_format_indices(fx.indices))]"
     end
     if fx.iter === nothing
-        println(io, indent, "JuMP.fix(", target, ", ", fx.value, "; force = true)")
+        println(io, indent, "JuMP.fix(", target, ", ", value_expr, "; force = true)")
         return
     end
     set_src =
         fx.iter.set isa Symbol ? string(fx.iter.set) :
         "$(fx.iter.set.start):$(fx.iter.set.stop)"
     println(io, indent, "for ", fx.iter.var, " in ", set_src)
-    println(io, indent, "    JuMP.fix(", target, ", ", fx.value, "; force = true)")
+    println(io, indent, "    JuMP.fix(", target, ", ", value_expr, "; force = true)")
     println(io, indent, "end")
     return
 end
@@ -146,9 +153,13 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     for p in values(model.parameters)
         push!(kwargs, _format_param_kwarg(p, p.name in inline))
     end
-    push!(kwargs, "fixes = JuMPConverter.FixStatement[]")
-    print(io, "; ")
-    join(io, kwargs, ", ")
+    for fx in model.parametric_fixes
+        push!(kwargs, "$(JuMPConverter.AMPL.fix_kwarg_name(fx)) = nothing")
+    end
+    if !isempty(kwargs)
+        print(io, "; ")
+        join(io, kwargs, ", ")
+    end
     println(io, ")")
     println(io, "    model = Model()")
     for variable in values(model.variables)
@@ -159,9 +170,14 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     end
     println(io, "    ", model.objective)
     for fx in model.fixes
-        _print_fix(io, fx, "    ")
+        _print_fix(io, fx, "    ", repr(fx.value))
     end
-    _print_runtime_fix_loop(io, model)
+    for fx in model.parametric_fixes
+        kw = JuMPConverter.AMPL.fix_kwarg_name(fx)
+        println(io, "    if ", kw, " !== nothing")
+        _print_fix(io, fx, "        ", string(kw))
+        println(io, "    end")
+    end
     println(io, "    return model")
     print(io, "end")
     if has_data_loader
@@ -169,26 +185,6 @@ function Base.show(io::IO, model::JuMPConverter.Model)
         println(io)
         _print_data_loader(io, model)
     end
-    return
-end
-
-# Apply runtime `fixes` (data-section fixes parsed at load time) via
-# `apply_fix!`, passing a NamedTuple of every set / parameter that's
-# in scope so the helper can resolve iter sources (`i in m`) and index
-# references without `eval`.
-function _print_runtime_fix_loop(io::IO, model::JuMPConverter.Model)
-    println(io, "    for fx in fixes")
-    print(io, "        JuMPConverter.AMPL.apply_fix!(model, fx, (;")
-    names = String[]
-    for n in keys(model.sets)
-        push!(names, " $n")
-    end
-    for n in keys(model.parameters)
-        push!(names, " $n")
-    end
-    join(io, names, ",")
-    println(io, "))")
-    println(io, "    end")
     return
 end
 
@@ -222,9 +218,35 @@ function _print_data_loader(io::IO, model::JuMPConverter.Model)
     println(io, "    else")
     println(io, "        JuMPConverter.AMPL.read_dat(path, schema)")
     println(io, "    end")
-    # `parse_dat` returns `fix` statements under `:fixes`; the kwarg
-    # build_model splats it through as `fixes` and applies them.
-    println(io, "    return build_model(; data...)")
+    # `parse_dat` stuffs structured `fix` statements under `:fixes`.
+    # Route each one onto its pre-registered `fix_<…>` kwarg, erroring
+    # if the runtime `.dat` contains a fix whose structure wasn't seen
+    # in the example `.dat` (or explicit list) at conversion time.
+    println(io, "    fixes = pop!(data, :fixes, JuMPConverter.FixStatement[])")
+    println(io, "    fix_kwargs = Dict{Symbol,Any}()")
+    println(io, "    for fx in fixes")
+    println(io, "        kw = JuMPConverter.AMPL.fix_kwarg_name(fx)")
+    print(io, "        kw in (")
+    join(
+        io,
+        (":$(JuMPConverter.AMPL.fix_kwarg_name(fx))" for
+         fx in model.parametric_fixes),
+        ", ",
+    )
+    println(io, ") || error(")
+    println(
+        io,
+        "            \"runtime .dat contains an unregistered fix `\$kw`; \" *",
+    )
+    println(
+        io,
+        "            \"re-run conversion with this .dat as `example_dat` \" *",
+    )
+    println(io, "            \"or list this variable explicitly.\",")
+    println(io, "        )")
+    println(io, "        fix_kwargs[kw] = fx.value")
+    println(io, "    end")
+    println(io, "    return build_model(; data..., fix_kwargs...)")
     print(io, "end")
     return
 end

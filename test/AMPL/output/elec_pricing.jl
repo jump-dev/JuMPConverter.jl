@@ -28,7 +28,6 @@ function build_model(;
         1:X,
         1:(3+H),
     ),
-    fixes = JuMPConverter.FixStatement[],
 )
     model = Model()
     @variable(model, 0 <= xx[w in 1:W, h in 1:H] <= 1)
@@ -68,13 +67,6 @@ function build_model(;
         sum(rho[s] * (2.0 / beta[s] * y[s, 0] - mu[s]) for s in 1:S) -
         10 * sum(eta[w] for w in 1:W)
     )
-    for fx in fixes
-        JuMPConverter.AMPL.apply_fix!(
-            model,
-            fx,
-            (; S, W, H, X, rho, beta, alpha, E, C, R, polyX),
-        )
-    end
     return model
 end
 
@@ -99,5 +91,16 @@ function build_model(path::String)
     else
         JuMPConverter.AMPL.read_dat(path, schema)
     end
-    return build_model(; data...)
+    fixes = pop!(data, :fixes, JuMPConverter.FixStatement[])
+    fix_kwargs = Dict{Symbol,Any}()
+    for fx in fixes
+        kw = JuMPConverter.AMPL.fix_kwarg_name(fx)
+        kw in () || error(
+            "runtime .dat contains an unregistered fix `$kw`; " *
+            "re-run conversion with this .dat as `example_dat` " *
+            "or list this variable explicitly.",
+        )
+        fix_kwargs[kw] = fx.value
+    end
+    return build_model(; data..., fix_kwargs...)
 end

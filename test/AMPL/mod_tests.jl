@@ -528,7 +528,7 @@ function test_set_declaration()
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0.0, length(PRODUCTS)), PRODUCTS), fixes = JuMPConverter.FixStatement[])",
+        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0.0, length(PRODUCTS)), PRODUCTS))",
     )
     return
 end
@@ -549,7 +549,7 @@ function test_set_with_default_is_optional_kwarg()
     @test model.sets["N"].default == "1:2"
     @test model.sets["T"].default === nothing
     rendered = sprint(print, model)
-    @test contains(rendered, "build_model(; T, N = 1:2, fixes = JuMPConverter.FixStatement[])")
+    @test contains(rendered, "build_model(; T, N = 1:2)")
     return
 end
 
@@ -658,7 +658,7 @@ function test_generated_file_has_data_loader()
     @test contains(rendered, "[:K]")
     @test contains(rendered, "JuMPConverter.AMPL.read_dat(path, schema)")
     @test contains(rendered, "JuMPConverter.AMPL.read_csv(path, schema)")
-    @test contains(rendered, "build_model(; data...)")
+    @test contains(rendered, "build_model(; data..., fix_kwargs...)")
     @test Meta.parseall(rendered) isa Expr
     return
 end

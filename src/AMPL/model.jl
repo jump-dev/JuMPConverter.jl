@@ -483,32 +483,6 @@ function _parse_fix_number!(lex::Lexer)
     return sign * parse(Float64, expect!(lex, TOKEN_NUMBER).value)
 end
 
-# Apply a runtime-parsed `FixStatement` against a built JuMP model.
-# `sets` is a NamedTuple carrying every set/param kwarg of `build_model`
-# so that an iter source like `i in m` and an index like `[i]` can
-# resolve `m` without `eval`.
-function apply_fix!(
-    model::JuMPConverter.JuMP.Model,
-    fx::JuMPConverter.FixStatement,
-    sets::NamedTuple,
-)
-    var = model[fx.variable]
-    if fx.iter === nothing
-        target = isempty(fx.indices) ? var : var[fx.indices...]
-        JuMPConverter.JuMP.fix(target, fx.value; force = true)
-        return
-    end
-    set = fx.iter.set isa Symbol ? sets[fx.iter.set] : fx.iter.set
-    for i in set
-        resolved = Any[
-            idx isa Symbol && idx == fx.iter.var ? i : idx for
-            idx in fx.indices
-        ]
-        target = isempty(resolved) ? var : var[resolved...]
-        JuMPConverter.JuMP.fix(target, fx.value; force = true)
-    end
-    return
-end
 
 function _is_keyword(value::AbstractString)
     return value in (
@@ -640,8 +614,54 @@ function parse_model(mod::AbstractString)
     return model
 end
 
-function read_model(path::AbstractString)
-    return parse_model(read(path, String))
+"""
+    read_model(path::AbstractString;
+               example_dat::Union{Nothing,AbstractString} = nothing) -> Model
+
+Parse an AMPL `.mod` and (optionally) an example `.dat` whose `fix`
+statements declare which variables should become tunable `fix_<…>`
+kwargs of the generated `build_model`.
+
+The example `.dat`'s data values are ignored — only the `fix`
+*structure* (variable, indices, iter pattern) is kept. Runtime `.dat`
+files passed to `build_model(path::String)` may carry the same fixes
+with different values; any fix whose structure wasn't pre-registered
+this way is an error at load time.
+"""
+function read_model(
+    path::AbstractString;
+    example_dat::Union{Nothing,AbstractString} = nothing,
+)
+    model = parse_model(read(path, String))
+    if example_dat !== nothing
+        # Pass the model-derived schema so `parse_dat` takes the
+        # typed branch — the schemaless path mis-parses some `.dat`s
+        # (e.g. portfl1.dat: floats in indexed-param values).
+        schema = DatSchema(model)
+        data = parse_dat(read(example_dat, String), schema)
+        fixes = get(data, "fixes", JuMPConverter.FixStatement[])
+        for fx in fixes
+            push!(model.parametric_fixes, fx)
+        end
+    end
+    return model
+end
+
+"""
+    fix_kwarg_name(fx::FixStatement) -> Symbol
+
+Stable kwarg name for a parametric fix: `fix_<var>` plus the literal
+(non-iter) indices joined with underscores. `fix PL := 1` →
+`:fix_PL`; `fix{i in m} H[i,'y1','y2']` → `:fix_H_y1_y2`;
+`fix x[1] := 0` → `:fix_x_1`.
+"""
+function fix_kwarg_name(fx::JuMPConverter.FixStatement)
+    parts = ["fix", string(fx.variable)]
+    for idx in fx.indices
+        idx isa Symbol && continue
+        push!(parts, string(idx))
+    end
+    return Symbol(join(parts, "_"))
 end
 
 function clean_expression(expr::AbstractString)
