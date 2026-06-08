@@ -42,20 +42,18 @@ Base.@kwdef struct Constraint
     expression::String
 end
 
-# AMPL `fix [{ITER}] VAR[idx, …] := VALUE;` parsed into structured
-# pieces so the emitter (and the runtime helper) can apply it via
-# `JuMP.fix(model[:VAR][idx…], VALUE; force = true)` without ever
-# needing to `eval` a string.
+# AMPL `fix [{i in SET}] VAR[idx, …] := VALUE;` parsed into structured
+# pieces so the emitter can apply it via `JuMP.fix(model[:VAR][idx…],
+# VALUE; force = true)` without ever needing to `eval` a string.
 #
-# `indices` entries are one of:
-#   * an `Int` / `Float64` literal,
-#   * a `String` (from AMPL `'foo'`),
-#   * a `Symbol` referring to `iter.var`.
-# `iter.set` is either a `Symbol` (look up by name in the caller's
-# sets/params) or a literal `UnitRange{Int}`.
+# `indices` entries are either a `String` (from AMPL `'foo'`) or a
+# `Symbol` referring to `iter.var` — that's the index shape real
+# `.dat`s exercise (bar-truss-3). `iter.set` is the set name to
+# iterate over (resolved from the local `build_model` scope at the
+# call site).
 Base.@kwdef struct FixIter
     var::Symbol
-    set::Union{Symbol,UnitRange{Int}}
+    set::Symbol
 end
 
 Base.@kwdef struct FixStatement

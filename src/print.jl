@@ -129,10 +129,7 @@ function _print_fix(
         )
         return
     end
-    set_src =
-        fx.iter.set isa Symbol ? string(fx.iter.set) :
-        "$(fx.iter.set.start):$(fx.iter.set.stop)"
-    println(io, indent, "for ", fx.iter.var, " in ", set_src)
+    println(io, indent, "for ", fx.iter.var, " in ", fx.iter.set)
     println(
         io,
         indent,

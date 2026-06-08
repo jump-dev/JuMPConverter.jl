@@ -403,9 +403,15 @@ function _parse_constraint!(lex::Lexer, model::JuMPConverter.Model)
     return
 end
 
-# Parse `fix [{ITER}] VAR[idx, …] := VALUE;` into a structured
-# `FixStatement`. Used by both `parse_model` (model-section fix in the
+# Parse `fix [{i in SET}] VAR[idx, …] := VALUE;` into a structured
+# `FixStatement`. Covers both `parse_model` (model-section fix in the
 # .mod) and `parse_dat` (fix in a data section / .dat file).
+#
+# Supported syntax matches what real `.dat`s exercise (taxmcp's scalar
+# `fix PL := 1;` and bar-truss-3's `fix{i in m} H[i,'y1','y2'] := 0;`).
+# Forms not yet seen — range iter `{i in 1..n}`, numeric/negative
+# indices, negative values — would error and can be added when a real
+# `.mod`/`.dat` needs them.
 function _parse_fix!(lex::Lexer)
     iter = nothing
     if peek(lex).kind == TOKEN_LBRACE
@@ -424,62 +430,30 @@ function _parse_fix!(lex::Lexer)
         end
         read_token!(lex)  # consume `]`
     end
-    if peek(lex).kind != TOKEN_ASSIGN
-        # `fix VAR;` without `:= VALUE` would pin to the current value;
-        # nothing to pin at build time.
-        @warn "skipping `fix` without `:=` (no value to pin)" variable
-        # Skip to the terminating semicolon.
-        while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
-            read_token!(lex)
-        end
-        return nothing
-    end
-    read_token!(lex)  # consume `:=`
-    value = _parse_fix_number!(lex)
+    expect!(lex, TOKEN_ASSIGN)
+    value = parse(Float64, expect!(lex, TOKEN_NUMBER).value)
     return JuMPConverter.FixStatement(; variable, indices, value, iter)
 end
 
 function _parse_fix_iter!(lex::Lexer)
     var = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
     in_tok = expect!(lex, TOKEN_IDENTIFIER)
-    in_tok.value == "in" ||
-        error("expected `in` after fix iter variable, got `$(in_tok.value)`")
-    t = peek(lex)
-    set = if t.kind == TOKEN_NUMBER
-        lo = parse(Int, read_token!(lex).value)
-        expect!(lex, TOKEN_DOTDOT)
-        hi = parse(Int, expect!(lex, TOKEN_NUMBER).value)
-        lo:hi
-    else
-        Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
-    end
+    @assert in_tok.value == "in"
+    set = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
     expect!(lex, TOKEN_RBRACE)
     return JuMPConverter.FixIter(; var, set)
 end
 
+# Each fix index is either an iter-bound symbol (`i`) or an AMPL
+# string literal (`'y1'`).
 function _parse_fix_index!(lex::Lexer)
     t = read_token!(lex)
-    if t.kind == TOKEN_NUMBER
-        n = tryparse(Int, t.value)
-        return n === nothing ? parse(Float64, t.value) : n
-    elseif t.kind == TOKEN_STRING
+    if t.kind == TOKEN_STRING
         return t.value
     elseif t.kind == TOKEN_IDENTIFIER
         return Symbol(t.value)
-    elseif t.kind == TOKEN_MINUS
-        n_tok = expect!(lex, TOKEN_NUMBER)
-        return -parse(Float64, n_tok.value)
     end
     return error("unexpected token in fix index: $(t.kind) `$(t.value)`")
-end
-
-function _parse_fix_number!(lex::Lexer)
-    sign = 1
-    if peek(lex).kind == TOKEN_MINUS
-        read_token!(lex)
-        sign = -1
-    end
-    return sign * parse(Float64, expect!(lex, TOKEN_NUMBER).value)
 end
 
 function _is_keyword(value::AbstractString)
