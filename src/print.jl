@@ -231,6 +231,11 @@ function _print_data_loader(io::IO, model::JuMPConverter.Model)
     println(io, "    else")
     println(io, "        JuMPConverter.AMPL.read_dat(path, schema)")
     println(io, "    end")
+    if isempty(model.parametric_fixes)
+        println(io, "    return build_model(; data...)")
+        print(io, "end")
+        return
+    end
     # `parse_dat` stuffs structured `fix` statements under `:fixes`.
     # Route each one onto its pre-registered `fix_<…>` kwarg, erroring
     # if the runtime `.dat` contains a fix whose structure wasn't seen

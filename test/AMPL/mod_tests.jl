@@ -658,7 +658,7 @@ function test_generated_file_has_data_loader()
     @test contains(rendered, "[:K]")
     @test contains(rendered, "JuMPConverter.AMPL.read_dat(path, schema)")
     @test contains(rendered, "JuMPConverter.AMPL.read_csv(path, schema)")
-    @test contains(rendered, "build_model(; data..., fix_kwargs...)")
+    @test contains(rendered, "build_model(; data...)")
     @test Meta.parseall(rendered) isa Expr
     return
 end
