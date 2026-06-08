@@ -181,7 +181,7 @@ function _read_dat_value!(lex::Lexer)
     elseif t.kind == TOKEN_NUMBER
         read_token!(lex)
         return _any_parse(t.value)
-    elseif t.kind == TOKEN_IDENTIFIER
+    elseif t.kind == TOKEN_IDENTIFIER || t.kind == TOKEN_STRING
         read_token!(lex)
         return t.value
     else
@@ -386,7 +386,9 @@ function _dat_parse_multi_column!(
                   peek(lex).kind != TOKEN_SEMICOLON &&
                   peek(lex).kind != TOKEN_EOF
             t = read_token!(lex)
-            if t.kind == TOKEN_IDENTIFIER || t.kind == TOKEN_NUMBER
+            if t.kind == TOKEN_IDENTIFIER ||
+               t.kind == TOKEN_STRING ||
+               t.kind == TOKEN_NUMBER
                 push!(section_cols, t.value)
             end
         end
@@ -654,12 +656,16 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
                 _dat_parse_param!(lex, data, schema)
             end
         elseif kw == "fix"
+            # Data-section `fix VAR := V;` modifies model variables, not
+            # data values. Stash structured fixes under `"fixes"` so the
+            # generated `build_model(path::String)` can route them onto
+            # the matching `fix_<…>` kwarg.
             read_token!(lex)
-            @warn("fix is not supported yet")
-            while peek(lex).kind != TOKEN_SEMICOLON &&
-                peek(lex).kind != TOKEN_EOF
-                read_token!(lex)
+            fx = _parse_fix!(lex)
+            fixes = get!(data, "fixes") do
+                return JuMPConverter.FixStatement[]
             end
+            push!(fixes, fx)
         elseif kw == "for" || kw == "if"
             read_token!(lex)
             depth = 0

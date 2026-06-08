@@ -46,7 +46,16 @@ function read_from_file(
     else
         error("Unsupported extension '$ext' for $model_path; expected .mod or .gms")
     end
-    parsed = reader(model_path)
+    # When loading an AMPL `.mod` alongside its `.dat`, treat the
+    # `.dat` as the example for discovering data-section fixes — its
+    # `fix` statements become `fix_<…>` kwargs of the generated
+    # `build_model`, and the path-loader matches the same `.dat`'s
+    # fixes onto them at runtime.
+    parsed = if reader === AMPL.read_model && dat_path !== nothing
+        AMPL.read_model(model_path; example_dat = dat_path)
+    else
+        reader(model_path)
+    end
     sandbox = Module(:JuMPConverterSandbox)
     # Bring `JuMP` into the sandbox via JuMPConverter's deps so the
     # generated code's `using JuMP` resolves even when the caller's

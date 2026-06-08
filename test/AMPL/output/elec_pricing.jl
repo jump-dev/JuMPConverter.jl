@@ -91,5 +91,16 @@ function build_model(path::String)
     else
         JuMPConverter.AMPL.read_dat(path, schema)
     end
-    return build_model(; data...)
+    fixes = pop!(data, :fixes, JuMPConverter.FixStatement[])
+    fix_kwargs = Dict{Symbol,Any}()
+    for fx in fixes
+        kw = JuMPConverter.AMPL.fix_kwarg_name(fx)
+        kw in () || error(
+            "runtime .dat contains an unregistered fix `$kw`; " *
+            "re-run conversion with this .dat as `example_dat` " *
+            "or list this variable explicitly.",
+        )
+        fix_kwargs[kw] = fx.value
+    end
+    return build_model(; data..., fix_kwargs...)
 end

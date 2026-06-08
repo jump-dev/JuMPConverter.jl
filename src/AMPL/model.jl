@@ -104,7 +104,7 @@ function _read_expression!(lex::Lexer, stops::NTuple{N,TokenKind}) where {N}
             continue
         end
         read_token!(lex)
-        val = t.value
+        val = emit_token(t)
         # Insert spacing intelligently
         if !isempty(parts) && _needs_space(prev_kind, t.kind)
             push!(parts, " ")
@@ -403,6 +403,59 @@ function _parse_constraint!(lex::Lexer, model::JuMPConverter.Model)
     return
 end
 
+# Parse `fix [{i in SET}] VAR[idx, …] := VALUE;` into a structured
+# `FixStatement`. Covers both `parse_model` (model-section fix in the
+# .mod) and `parse_dat` (fix in a data section / .dat file).
+#
+# Supported syntax matches what real `.dat`s exercise (taxmcp's scalar
+# `fix PL := 1;` and bar-truss-3's `fix{i in m} H[i,'y1','y2'] := 0;`).
+# Forms not yet seen — range iter `{i in 1..n}`, numeric/negative
+# indices, negative values — would error and can be added when a real
+# `.mod`/`.dat` needs them.
+function _parse_fix!(lex::Lexer)
+    iter = nothing
+    if peek(lex).kind == TOKEN_LBRACE
+        read_token!(lex)  # consume `{`
+        iter = _parse_fix_iter!(lex)
+    end
+    variable = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    indices = Any[]
+    if peek(lex).kind == TOKEN_LBRACKET
+        read_token!(lex)
+        while peek(lex).kind != TOKEN_RBRACKET
+            push!(indices, _parse_fix_index!(lex))
+            if peek(lex).kind == TOKEN_COMMA
+                read_token!(lex)
+            end
+        end
+        read_token!(lex)  # consume `]`
+    end
+    expect!(lex, TOKEN_ASSIGN)
+    value = parse(Float64, expect!(lex, TOKEN_NUMBER).value)
+    return JuMPConverter.FixStatement(; variable, indices, value, iter)
+end
+
+function _parse_fix_iter!(lex::Lexer)
+    var = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    in_tok = expect!(lex, TOKEN_IDENTIFIER)
+    @assert in_tok.value == "in"
+    set = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    expect!(lex, TOKEN_RBRACE)
+    return JuMPConverter.FixIter(; var, set)
+end
+
+# Each fix index is either an iter-bound symbol (`i`) or an AMPL
+# string literal (`'y1'`).
+function _parse_fix_index!(lex::Lexer)
+    t = read_token!(lex)
+    if t.kind == TOKEN_STRING
+        return t.value
+    elseif t.kind == TOKEN_IDENTIFIER
+        return Symbol(t.value)
+    end
+    return error("unexpected token in fix index: $(t.kind) `$(t.value)`")
+end
+
 function _is_keyword(value::AbstractString)
     return value in (
         "param",
@@ -493,6 +546,10 @@ function parse_model(mod::AbstractString)
             read_token!(lex)
             # Skip check statements
             _read_expression!(lex, (TOKEN_SEMICOLON,))
+        elseif kw == "fix"
+            read_token!(lex)
+            fx = _parse_fix!(lex)
+            fx === nothing || push!(model, fx)
         elseif kw == "data"
             # Switch to AMPL's data section: everything from here to EOF
             # is values for already-declared params/sets, not model code.
@@ -529,8 +586,54 @@ function parse_model(mod::AbstractString)
     return model
 end
 
-function read_model(path::AbstractString)
-    return parse_model(read(path, String))
+"""
+    read_model(path::AbstractString;
+               example_dat::Union{Nothing,AbstractString} = nothing) -> Model
+
+Parse an AMPL `.mod` and (optionally) an example `.dat` whose `fix`
+statements declare which variables should become tunable `fix_<…>`
+kwargs of the generated `build_model`.
+
+The example `.dat`'s data values are ignored — only the `fix`
+*structure* (variable, indices, iter pattern) is kept. Runtime `.dat`
+files passed to `build_model(path::String)` may carry the same fixes
+with different values; any fix whose structure wasn't pre-registered
+this way is an error at load time.
+"""
+function read_model(
+    path::AbstractString;
+    example_dat::Union{Nothing,AbstractString} = nothing,
+)
+    model = parse_model(read(path, String))
+    if example_dat !== nothing
+        # Pass the model-derived schema so `parse_dat` takes the
+        # typed branch — the schemaless path mis-parses some `.dat`s
+        # (e.g. portfl1.dat: floats in indexed-param values).
+        schema = DatSchema(model)
+        data = parse_dat(read(example_dat, String), schema)
+        fixes = get(data, "fixes", JuMPConverter.FixStatement[])
+        for fx in fixes
+            push!(model.parametric_fixes, fx)
+        end
+    end
+    return model
+end
+
+"""
+    fix_kwarg_name(fx::FixStatement) -> Symbol
+
+Stable kwarg name for a parametric fix: `fix_<var>` plus the literal
+(non-iter) indices joined with underscores. `fix PL := 1` →
+`:fix_PL`; `fix{i in m} H[i,'y1','y2']` → `:fix_H_y1_y2`;
+`fix x[1] := 0` → `:fix_x_1`.
+"""
+function fix_kwarg_name(fx::JuMPConverter.FixStatement)
+    parts = ["fix", string(fx.variable)]
+    for idx in fx.indices
+        idx isa Symbol && continue
+        push!(parts, string(idx))
+    end
+    return Symbol(join(parts, "_"))
 end
 
 function clean_expression(expr::AbstractString)

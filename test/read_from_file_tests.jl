@@ -46,6 +46,36 @@ end
 # AMPL — kwargs forwarded to the kwarg `build_model`
 # ============================================================
 
+function test_read_ampl_mod_with_dat_fixes()
+    # The `.dat` doubles as the example for discovering data-section
+    # `fix` statements: each unique fix becomes a `fix_<…> = nothing`
+    # kwarg, and the runtime path-loader fills it from the same `.dat`.
+    mktempdir() do dir
+        mod = """
+        set I;
+        var x {I};
+        minimize obj: sum {i in I} x[i];
+        """
+        dat = """
+        set I := a b c;
+        fix x['a'] := 5;
+        fix{i in I} x[i] := 7;
+        """
+        mod_path = joinpath(dir, "m.mod")
+        dat_path = joinpath(dir, "m.dat")
+        write(mod_path, mod)
+        write(dat_path, dat)
+        jm = JuMPConverter.read_from_file(mod_path, dat_path)
+        x = jm[:x]
+        # Both fixes applied in declaration order: the iter fix runs
+        # after the scalar one, so x["a"] ends up at 7.
+        @test JuMP.fix_value(x["a"]) == 7.0
+        @test JuMP.fix_value(x["b"]) == 7.0
+        @test JuMP.fix_value(x["c"]) == 7.0
+    end
+    return
+end
+
 function test_read_ampl_mod_with_kwargs()
     # An MWE that has a default-less scalar plus a 1D param with a
     # default — passing `n` as a kwarg satisfies the required arg, and
