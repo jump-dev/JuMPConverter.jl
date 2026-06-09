@@ -309,6 +309,32 @@ function test_variable_both_bounds()
     return
 end
 
+function test_variable_both_bounds_no_comma()
+    # AMPL accepts the two bounds back-to-back with no comma:
+    # `var x{…} >= LB <= UB;`. The parser used to swallow `LB <= UB`
+    # whole into `lower_bound`, and the printer then emitted
+    # `x[…] >= LB <= UB` — which `@variable` rejects as an unsupported
+    # mix of comparison operators.
+    mod = """
+    set N;
+    param u_x {N, N};
+    var x {i in N, j in N} >= 0 <= u_x[i,j];
+    minimize obj: sum {i in N, j in N} x[i, j];
+    subject to
+    c {i in N, j in N}: x[i, j] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.variables["x"].lower_bound == "0"
+    @test model.variables["x"].upper_bound == "u_x[i, j]"
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "@variable(model, 0 <= x[i in N, j in N] <= u_x[i, j])",
+    )
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 function test_variable_zero_start_index()
     mod = """
     param S integer;

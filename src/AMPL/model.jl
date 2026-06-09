@@ -304,10 +304,20 @@ function _parse_var!(lex::Lexer, model::JuMPConverter.Model)
         t = peek(lex)
         if t.kind == TOKEN_GEQ
             read_token!(lex)
-            lower_bound = _read_expression!(lex, (TOKEN_SEMICOLON, TOKEN_COMMA))
+            # Stop at the opposite-direction comparator too, so AMPL's
+            # `var x >= LB <= UB;` (no comma between the bounds) gets
+            # split into separate lb and ub instead of one swallowed
+            # `"LB <= UB"` expression.
+            lower_bound = _read_expression!(
+                lex,
+                (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_LEQ, TOKEN_GEQ),
+            )
         elseif t.kind == TOKEN_LEQ
             read_token!(lex)
-            upper_bound = _read_expression!(lex, (TOKEN_SEMICOLON, TOKEN_COMMA))
+            upper_bound = _read_expression!(
+                lex,
+                (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_LEQ, TOKEN_GEQ),
+            )
         elseif t.kind == TOKEN_IDENTIFIER && t.value == "binary"
             read_token!(lex)
             binary = true
