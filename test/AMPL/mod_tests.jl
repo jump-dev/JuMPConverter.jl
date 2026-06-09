@@ -309,6 +309,196 @@ function test_variable_both_bounds()
     return
 end
 
+function test_conditional_expr_translates_to_ternary()
+    # monteiro-style: AMPL `(if COND then A else B)` inside an
+    # expression needs to render as Julia `(COND ? A : B)`, not
+    # `if COND then A else B` (a Julia parse error in expression
+    # position).
+    mod = """
+    set N;
+    set D;
+    param QD {N};
+    var x {N};
+    minimize obj: sum {n in N} ((if n in D then QD[n] else 0) - x[n]);
+    subject to
+    c {n in N}: x[n] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "(n in D ? QD[n] : 0)")
+    @test !contains(rendered, "if n in D")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_sum_body_stops_at_complements()
+    # taxmcp-style: `LHS >= sum{...} EXPR complements VAR`. The sum
+    # body must stop at `complements`, otherwise the variable side
+    # gets swallowed into the generator (`sum(... ⟂ PK for i in I)`).
+    mod = """
+    set I;
+    var PK >= 0;
+    var Y {I};
+    param kbar;
+    minimize obj: PK;
+    s.t. MARKETK: PK * kbar >= sum {i in I} Y[i] complements PK >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    # The sum's body is just `Y[i]`; `PK` belongs on the variable side
+    # of `⟂`, not inside the generator.
+    @test contains(expr, "sum(Y[i] for i in I)")
+    @test endswith(expr, "⟂ PK")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_ampl_logical_keywords_translated()
+    # tollmpec-style: AMPL `and` / `or` / `not` need to render as
+    # Julia `&&` / `||` / `!` — `and` left alone fails to parse in a
+    # `for j in N if (...) and (...)` generator filter.
+    mod = """
+    set ARCS within {1..3, 1..3};
+    var x {ARCS};
+    minimize obj: sum {(i, j) in ARCS if (i, j) in ARCS and i != 1} x[i, j];
+    subject to
+    c {(i, j) in ARCS}: x[i, j] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.objective.expression
+    @test contains(expr, "&&")
+    @test !occursin(r"\band\b", expr)
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_conditional_expr_without_else_defaults_to_zero()
+    # water-net-style: `(if COND then EXPR)` with no `else` — AMPL
+    # treats the missing branch as 0.
+    mod = """
+    set reservoirs;
+    set nodes;
+    var s {reservoirs};
+    minimize obj: sum {i in nodes} (if i in reservoirs then s[i]);
+    subject to
+    c {i in nodes}: 1 >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.objective.expression
+    @test contains(expr, "(i in reservoirs ? s[i] : 0)")
+    @test !occursin(r"\bif\b", expr)
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_conditional_expr_with_tuple_condition()
+    # tollmpec-style: `(if (i, j) in TOLL then EXPR else 0.0)` — the
+    # condition itself carries a `(i, j)` tuple. Need to allow one
+    # level of balanced parens in each ternary operand.
+    mod = """
+    set ARCS within {1..3, 1..3};
+    set TOLL within ARCS;
+    param trffcost {ARCS};
+    var x {ARCS};
+    minimize obj: sum {(i, j) in ARCS} ((if (i, j) in TOLL then 100 * trffcost[i, j] else 0.0) - x[i, j]);
+    subject to
+    c {(i, j) in ARCS}: x[i, j] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.objective.expression
+    @test contains(expr, "((i, j) in TOLL ? 100 * trffcost[i, j] : 0.0)")
+    @test !occursin(r"\bif\b", expr)
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_conditional_expr_with_paren_else_operand()
+    # monteiro-style: `sum(if l in Sf then 0 else (EXPR) for l in P)`
+    # — the if/then/else isn't paren-bounded as a whole, but the else
+    # operand carries its own parens. Need to translate to ternary
+    # without swallowing the surrounding `for … P)`.
+    mod = """
+    set Sf;
+    set P;
+    param a {P};
+    var QS {P};
+    minimize obj: sum {l in P} (if l in Sf then 0 else (a[l] * QS[l] + a[l] * QS[l]^2));
+    subject to
+    c {l in P}: QS[l] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.objective.expression
+    @test contains(expr, "(l in Sf ? 0 :")
+    @test !occursin(r"\bif\b", expr)
+    # The `for l in P` must NOT have been swallowed into the ternary.
+    @test contains(expr, "for l in P")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_set_default_brace_literal_to_vector()
+    # tap-09-style: `set DEST := { 3 , 4 };` — Julia's `{}` is the
+    # discontinued vector syntax; emit `[3, 4]` so the kwarg default
+    # parses.
+    mod = """
+    set DEST := { 3, 4 };
+    var x {DEST};
+    minimize obj: sum {i in DEST} x[i];
+    subject to
+    c {i in DEST}: x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["DEST"].default == "[3, 4]"
+    rendered = sprint(print, model)
+    @test contains(rendered, "DEST = [3, 4]")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_set_default_translates_diff_to_setdiff()
+    # incid-set1-style: `set int_nodes = nodes diff bnd_nodes;` should
+    # render as `setdiff(nodes, bnd_nodes)` so the generated
+    # `build_model` kwarg default is valid Julia.
+    mod = """
+    set nodes;
+    set bnd_nodes;
+    set int_nodes = nodes diff bnd_nodes;
+    var x {int_nodes} >= 0;
+    minimize obj: sum {i in int_nodes} x[i];
+    subject to
+    c {i in int_nodes}: x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["int_nodes"].default == "setdiff(nodes, bnd_nodes)"
+    rendered = sprint(print, model)
+    @test contains(rendered, "int_nodes = setdiff(nodes, bnd_nodes)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_variable_bound_then_init_value()
+    # design-cent-1-style: `var l{k in K} >= 0 := l0[k];`. The `:=` is
+    # an initial value, not part of the bound; the parser must stop the
+    # `>=` expression at it so `lower_bound` ends up as just `"0"` and
+    # the emitted `@variable` doesn't contain `>= 0 := l0[k]`.
+    mod = """
+    set K;
+    param l0 {K};
+    var l {k in K} >= 0 := l0[k];
+    minimize obj: sum {k in K} l[k];
+    subject to
+    c {k in K}: l[k] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.variables["l"].lower_bound == "0"
+    @test model.variables["l"].upper_bound === nothing
+    rendered = sprint(print, model)
+    @test !contains(rendered, ":= l0")
+    @test contains(rendered, "@variable(model, l[k in K] >= 0)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 function test_variable_both_bounds_no_comma()
     # AMPL accepts the two bounds back-to-back with no comma:
     # `var x{…} >= LB <= UB;`. The parser used to swallow `LB <= UB`
@@ -789,6 +979,128 @@ function test_complementarity_strips_bounds_and_orders_var_last()
     return
 end
 
+function test_complementarity_equality_kkt_renders_as_eq_constraint()
+    # bard2m-style KKT stationarity: `0 = LHS complements VAR`. The
+    # left side is already an equality, so the resulting JuMP
+    # constraint is just `LHS == 0` — emitting `0 == LHS ⟂ VAR` (the
+    # naive split) would be a JuMP-rejected mix of comparison
+    # operators.
+    mod = """
+    var y11 >= 0, <= 20;
+    var m_c11 <= 0;
+    var m_c12 <= 0;
+    minimize obj: 0;
+    s.t. d_y11: 0 = 2*(y11-4) - m_c11*0.4 - m_c12*0.6 complements y11;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test !contains(expr, "⟂")
+    @test endswith(expr, "== 0")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_complementarity_strips_two_sided_bounds_on_expr_side()
+    # bilevel1m-style: `LB <= EXPR <= UB complements VAR`. Both LHS
+    # bounds must be stripped so the emitted constraint is `EXPR ⟂ VAR`
+    # — keeping either bound produces a `mix of comparison operators`
+    # that JuMP can't parse.
+    mod = """
+    param n integer;
+    var y {1..n};
+    var l {1..n} >= 0;
+    minimize obj: 0;
+    s.t. m1: -10 <= y[1] <= 20 complements l[1];
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test !contains(expr, "<= 20")
+    @test !contains(expr, "-10 <=")
+    @test endswith(expr, "y[1] ⟂ l[1]")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_complementarity_strips_nonzero_upper_bound_on_expr_side()
+    # design-cent-2-style: `0 <= VAR complements EXPR <= 1` — the
+    # variable side gets the variable, the expression side has a
+    # non-zero upper bound. JuMP needs `EXPR ⟂ VAR`, so the `<= 1`
+    # must be stripped.
+    mod = """
+    set K;
+    param u;
+    var x;
+    var l {k in K} >= 0;
+    minimize obj: 0;
+    s.t. compl {k in K}: 0 <= l[k] complements x^2 <= 1;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test !contains(expr, "<= 1")
+    @test endswith(expr, "⟂ l[k]")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_complementarity_strips_expr_upper_bound_on_expr_side()
+    # design-cent-21-style: `0 <= VAR complements EXPR <= EXPR2` —
+    # the UB on the expression side isn't a number but another
+    # expression. Strip whatever follows the last top-level `<=`.
+    mod = """
+    set K;
+    var x {1..4};
+    var y {1..2, K};
+    var l {k in K} >= 0;
+    minimize obj: 0;
+    s.t. compl {k in K}: 0 <= l[k] complements (y[1,k] - x[1])^2 <= x[3]^2 * x[4]^2;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test !contains(expr, "<= x[3]")
+    @test endswith(expr, "⟂ l[k]")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_complementarity_strips_ge_lower_bound_on_expr_side()
+    # dempe-style: `0 >= EXPR complements VAR` (some `.mod`s write the
+    # bound with the larger side on the left). The `0 >=` is just the
+    # mirror image of `EXPR <= 0`; strip it the same way.
+    mod = """
+    var x;
+    var z;
+    var w >= 0;
+    minimize obj: 0;
+    s.t. con2: 0 >= z^2 - x complements w;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test !contains(expr, "0 >=")
+    @test endswith(expr, "⟂ w")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_complementarity_strips_le_zero_bound_on_var_side()
+    # bard2m-style: variables with an upper bound of 0 appear as
+    # `EXPR ⟂ VAR <= 0`. JuMP infers the bound from `var VAR <= 0;` so
+    # the trailing `<= 0` must be stripped just like `>= 0` is for the
+    # positive-bound case.
+    mod = """
+    var x11 >= 0;
+    var y11 >= 0;
+    var m_c11 <= 0;
+    minimize obj: 0;
+    s.t. c11: 0 <= -(0.4*y11 - x11) complements m_c11 <= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test !contains(expr, "<= 0")
+    @test endswith(expr, "⟂ m_c11")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
 function test_utf8_in_comment()
     # Multi-byte UTF-8 characters in comments must not crash the lexer.
     mod = """
@@ -813,13 +1125,13 @@ function test_conditional_expression_if_then_else()
     subject to
     c1 {i in 1..n}: x[i] <= 10;
     """
-    try
-        model = JuMPConverter.AMPL.parse_model(mod)
-        @test model.objective !== nothing
-        @test contains(model.objective.expression, "if")
-    catch
-        @test_broken false
-    end
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.objective !== nothing
+    # AMPL `(if … then … else …)` → Julia ternary; the rendered
+    # expression must not still contain `if` (which would be a
+    # statement-form Julia parse error in this position).
+    @test contains(model.objective.expression, "?")
+    @test !occursin(r"\bif\b", model.objective.expression)
     return
 end
 
