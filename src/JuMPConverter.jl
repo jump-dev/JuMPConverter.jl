@@ -56,17 +56,13 @@ function read_from_file(
     else
         reader(model_path)
     end
+    # Evaluate the generated source in a fresh module with nothing
+    # pre-imported, so any `using JuMP` / `import JuMPConverter` the
+    # generated file needs must appear in the file itself — anything
+    # missing surfaces here rather than when the file is later
+    # `include`d by an unrelated consumer.
     sandbox = Module(:JuMPConverterSandbox)
-    # Bring `JuMP` into the sandbox via JuMPConverter's deps so the
-    # generated code's `using JuMP` resolves even when the caller's
-    # active project doesn't carry JuMP as a direct dep.
-    Core.eval(sandbox, :(import JuMPConverter))
-    Core.eval(sandbox, :(using JuMPConverter.JuMP))
     src = sprint(print, parsed)
-    # The generated source's first line is `using JuMP`; we already
-    # injected the equivalent via `using JuMPConverter.JuMP` above, so
-    # strip it to avoid the package-loader's manifest lookup.
-    src = replace(src, r"^using JuMP\n"m => ""; count = 1)
     Core.eval(sandbox, Meta.parseall(src))
     return Base.invokelatest() do
         fn = getfield(sandbox, :build_model)
