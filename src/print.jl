@@ -154,6 +154,12 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     println(io, "using JuMP")
     has_data_loader = !isempty(model.parameters) || !isempty(model.sets)
     inline = model.inline_data_names
+    # The path loader and the inline-data const both qualify against
+    # `JuMPConverter.*`, so the file needs to bring `JuMPConverter`
+    # into scope itself rather than relying on the includer.
+    if has_data_loader || !isnothing(model.inline_data_text)
+        println(io, "import JuMPConverter")
+    end
     if !isnothing(model.inline_data_text)
         _print_inline_data_const(io, model)
         println(io)

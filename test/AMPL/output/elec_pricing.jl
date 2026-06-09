@@ -1,4 +1,5 @@
 using JuMP
+import JuMPConverter
 function build_model(;
     S,
     W,
