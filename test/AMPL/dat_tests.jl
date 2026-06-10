@@ -367,6 +367,40 @@ function test_let_command_skipped()
     return
 end
 
+function test_set_of_tuples_parses_as_tuples()
+    # water-net-style: `set arcs := (NW, W) (NW, CC) (NW, N);` — each
+    # `(item1, item2)` is a tuple member of the set, not a string.
+    data = JuMPConverter.AMPL.parse_dat("set arcs := (NW, W) (NW, CC) (NW, N);")
+    @test data["arcs"] == [("NW", "W"), ("NW", "CC"), ("NW", "N")]
+    return
+end
+
+function test_set_of_int_tuples_parses_as_tuples()
+    data = JuMPConverter.AMPL.parse_dat("set ARCS := (1, 2) (1, 3) (2, 4);")
+    @test data["ARCS"] == [(1, 2), (1, 3), (2, 4)]
+    return
+end
+
+function test_param_set_colon_cols_declares_set_and_cols()
+    # nash1-style: `param: SETNAME: c1 c2 := …` form — the second `:`
+    # after an identifier means the table also defines the set whose
+    # elements are the row indices, AND each column becomes a param
+    # indexed by that set.
+    data = JuMPConverter.AMPL.parse_dat("""
+    param:	InitPoints:	iptx1	iptx2	:=
+        run_a		0	0
+        run_b		5	5
+        run_c		10	10 ;
+    """)
+    @test data["InitPoints"] == ["run_a", "run_b", "run_c"]
+    iptx1 = data["iptx1"]
+    @test iptx1["run_a"] == 0.0
+    @test iptx1["run_b"] == 5.0
+    iptx2 = data["iptx2"]
+    @test iptx2["run_c"] == 10.0
+    return
+end
+
 function test_indexed_let_const_populates_dense_axis_array()
     # incid-set-style: `let{i in S} VAR[i] := CONST;` populates the
     # indexed parameter with a constant value at every element of the

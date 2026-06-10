@@ -204,10 +204,23 @@ function _dat_parse_set!(lex::Lexer, data::Dict{String,Any})
             read_token!(lex)
             continue
         elseif t.kind == TOKEN_LPAREN
+            # `set arcs := (1, 2) (1, 3) …;` — read as a real tuple so
+            # downstream consumers can index `A[(i, j)]` / `A[i, j]`
+            # rather than getting a `"(1, 2)"` string.
             read_token!(lex)
-            inner =
-                read_balanced!(lex, TOKEN_LPAREN, TOKEN_RPAREN; compact = true)
-            push!(values, "(" * inner * ")")
+            items = Any[]
+            while peek(lex).kind != TOKEN_RPAREN &&
+                      peek(lex).kind != TOKEN_EOF
+                if peek(lex).kind == TOKEN_COMMA
+                    read_token!(lex)
+                    continue
+                end
+                push!(items, _read_dat_value!(lex))
+            end
+            if peek(lex).kind == TOKEN_RPAREN
+                read_token!(lex)
+            end
+            push!(values, Tuple(items))
         else
             push!(values, _read_dat_value!(lex))
         end
@@ -231,6 +244,21 @@ function _dat_parse_param!(
     # Multi-column: `param : col1 col2 := ...`
     if t.kind == TOKEN_COLON
         read_token!(lex)
+        # `param: SETNAME: col1 col2 := …` (siouxfls, nash1) — the
+        # second `:` after an identifier means the table also defines
+        # the set whose elements are the row indices.
+        if peek(lex).kind == TOKEN_IDENTIFIER &&
+           peek(lex, 2).kind == TOKEN_COLON
+            set_name = read_token!(lex).value
+            read_token!(lex)  # consume second `:`
+            return _dat_parse_multi_column!(
+                lex,
+                data,
+                schema,
+                nothing;
+                set_name,
+            )
+        end
         return _dat_parse_multi_column!(lex, data, schema, nothing)
     end
     if t.kind != TOKEN_IDENTIFIER
@@ -374,7 +402,8 @@ function _dat_parse_multi_column!(
     lex::Lexer,
     data::Dict{String,Any},
     schema::Union{Nothing,DatSchema},
-    prefix_name::Union{Nothing,String},
+    prefix_name::Union{Nothing,String};
+    set_name::Union{Nothing,String} = nothing,
 )
     # Collect sections as (col_names, flat_values) pairs
     sections = Tuple{Vector{String},Vector{Any}}[]
@@ -423,9 +452,17 @@ function _dat_parse_multi_column!(
         end
     end
 
-    # Determine num_indices (row index dimensions)
-    num_indices =
-        _determine_num_indices(schema, prefix_name, all_col_names, sections)
+    # Determine num_indices (row index dimensions). For `param: SET:
+    # cols := …` the schema doesn't know the set's tuple-arity, so
+    # fall straight through to the row-layout heuristic — and prefer
+    # the largest fitting ni since the row indices are a tuple.
+    num_indices = _determine_num_indices(
+        set_name === nothing ? schema : nothing,
+        prefix_name,
+        all_col_names,
+        sections;
+        set_name,
+    )
 
     # Parse rows from each section
     # Key type: NTuple{num_indices,Int} or String
@@ -485,6 +522,11 @@ function _dat_parse_multi_column!(
         # than the DataFrame row tuple that JuMP can't multiply.
         data[prefix_name] = _df_to_2d_container(df)
     end
+    if set_name !== nothing
+        # `param: SETNAME: c1 c2 := …` also declares the set from the
+        # row indices.
+        data[set_name] = _convert_to_concrete_eltype(collect(df.index))
+    end
     return
 end
 
@@ -529,7 +571,8 @@ function _determine_num_indices(
     schema::Union{Nothing,DatSchema},
     prefix_name::Union{Nothing,String},
     all_col_names::Vector{String},
-    sections::Vector{Tuple{Vector{String},Vector{Any}}},
+    sections::Vector{Tuple{Vector{String},Vector{Any}}};
+    set_name::Union{Nothing,String} = nothing,
 )
     # From schema info (most reliable)
     if !isnothing(schema) && !isnothing(prefix_name)
@@ -544,11 +587,15 @@ function _determine_num_indices(
             return nd  # unnamed: all dims come from row indices
         end
     end
-    # Heuristic: try num_indices 1, 2, 3 against first section
+    # Heuristic: try num_indices against the first section. For
+    # `param: SETNAME: …` prefer the largest fitting ni — the row
+    # indices are a tuple of unknown arity, and ni=1 also fits any
+    # row whose total length happens to divide by `1 + num_cols`.
+    ni_order = set_name === nothing ? (1:3) : (3:-1:1)
     if !isempty(sections)
         first_cols, first_vals = sections[1]
         num_cols = length(first_cols)
-        for ni in 1:3
+        for ni in ni_order
             rs = ni + num_cols
             (isempty(first_vals) || length(first_vals) % rs != 0) && continue
             ok = true
