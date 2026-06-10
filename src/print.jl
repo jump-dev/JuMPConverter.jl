@@ -66,6 +66,25 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
     if inline
         return "$(p.name) = _INLINE_DATA[\"$(p.name)\"]"
     end
+    if !isnothing(p.default_expr)
+        # Expression default (`param h := 1/n;`).
+        if isnothing(p.axes)
+            return "$(p.name) = $(p.default_expr)"
+        end
+        # Indexed expression default — only the 1D simple-iter form
+        # has a clean Julia rendering as a `DenseAxisArray`
+        # comprehension. Multi-dim and tuple-iter forms (e.g. `param
+        # dist{(i, j) in arcs} := …`) need more machinery; drop the
+        # default and leave the kwarg required for now.
+        if length(p.axes.axes) == 1
+            a = p.axes.axes[1]
+            if !startswith(a.name, "(")
+                set = _ampl_range_to_julia(a.set)
+                return "$(p.name) = JuMP.Containers.DenseAxisArray([$(p.default_expr) for $(a.name) in $set], $set)"
+            end
+        end
+        return p.name
+    end
     isnothing(p.default) && return p.name
     if isnothing(p.axes)
         return "$(p.name) = $(p.default)"
@@ -166,11 +185,20 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     end
     print(io, "function build_model(")
     kwargs = String[]
-    for s in values(model.sets)
-        push!(kwargs, _format_set_kwarg(s, s.name in inline))
-    end
-    for p in values(model.parameters)
-        push!(kwargs, _format_param_kwarg(p, p.name in inline))
+    # Iterate sets + params in their original `.mod` declaration order
+    # so a kwarg's default expression can rely on every name declared
+    # above it being already bound (works in both directions:
+    # `set nodes := 1..Nnd` after `param Nnd := …`, and
+    # `param hl{i in nodes} := …` after `set nodes`).
+    for (kind, name) in model.kwarg_order
+        if kind === :param
+            push!(
+                kwargs,
+                _format_param_kwarg(model.parameters[name], name in inline),
+            )
+        else
+            push!(kwargs, _format_set_kwarg(model.sets[name], name in inline))
+        end
     end
     for fx in model.parametric_fixes
         push!(kwargs, "$(JuMPConverter.AMPL.fix_kwarg_name(fx)) = nothing")

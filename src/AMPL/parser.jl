@@ -645,15 +645,16 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
             read_token!(lex)
             _dat_parse_set!(lex, data)
         elseif kw == "let"
+            # `let VAR := EXPR;` (and the indexed `let{i in S} VAR[i]
+            # := EXPR;` form) sets *variable* starting values, not
+            # parameter data. The starts would map to JuMP's
+            # `set_start_value`; for now just skip the statement so
+            # the variable name doesn't leak into the data dict as a
+            # bogus kwarg of `build_model`.
             read_token!(lex)
-            if peek(lex).kind == TOKEN_LBRACE
-                # Indexed let: let{s in S} name[idx] := expr; — skip
-                while peek(lex).kind != TOKEN_SEMICOLON &&
-                    peek(lex).kind != TOKEN_EOF
-                    read_token!(lex)
-                end
-            else
-                _dat_parse_param!(lex, data, schema)
+            while peek(lex).kind != TOKEN_SEMICOLON &&
+                peek(lex).kind != TOKEN_EOF
+                read_token!(lex)
             end
         elseif kw == "fix"
             # Data-section `fix VAR := V;` modifies model variables, not

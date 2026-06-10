@@ -99,7 +99,8 @@ function _read_expression!(
         # keyword so the sum body doesn't swallow the variable side of
         # an enclosing complementarity constraint.
         if stop_at_complements &&
-           t.kind == TOKEN_IDENTIFIER && t.value == "complements"
+           t.kind == TOKEN_IDENTIFIER &&
+           t.value == "complements"
             break
         end
         # AMPL `sum {idx} body` / `prod {idx} body` → Julia generator syntax.
@@ -247,6 +248,7 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
     name = expect!(lex, TOKEN_IDENTIFIER).value
     axes = _read_axes!(lex)
     default = nothing
+    default_expr = nothing
     integer = false
     # Parse optional qualifiers until semicolon
     while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
@@ -254,6 +256,22 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
         if t.kind == TOKEN_IDENTIFIER && t.value == "default"
             read_token!(lex)
             default = parse(Float64, _read_expression!(lex, (TOKEN_SEMICOLON,)))
+        elseif t.kind == TOKEN_ASSIGN
+            # `param NAME := VALUE;` — inline assignment. Numeric
+            # literal becomes the `default` (design-cent-1's
+            # `pi := 3.141592654`); an expression becomes
+            # `default_expr` so the generated kwarg can carry it
+            # (incid-set1's `h := 1/n`). Stop at `,` too because AMPL
+            # allows trailing qualifiers (taxmcp's
+            # `param kbar := 1, > 0;`).
+            read_token!(lex)
+            rhs = strip(_read_expression!(lex, (TOKEN_SEMICOLON, TOKEN_COMMA)))
+            parsed = tryparse(Float64, rhs)
+            if parsed !== nothing
+                default = parsed
+            else
+                default_expr = clean_expression(String(rhs))
+            end
         elseif t.kind == TOKEN_IDENTIFIER && t.value == "integer"
             read_token!(lex)
             integer = true
@@ -273,7 +291,8 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
             read_token!(lex)
             while true
                 nx = peek(lex)
-                if nx.kind in (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_EOF)
+                if nx.kind in
+                   (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_EOF, TOKEN_ASSIGN)
                     break
                 elseif nx.kind == TOKEN_IDENTIFIER && nx.value in
                        ("default", "integer", "binary", "symbolic", "in")
@@ -299,7 +318,10 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
             read_token!(lex)
         end
     end
-    push!(model, JuMPConverter.Parameter(; name, axes, integer, default))
+    push!(
+        model,
+        JuMPConverter.Parameter(; name, axes, integer, default, default_expr),
+    )
     return
 end
 
@@ -428,7 +450,8 @@ function _ampl_set_ops_to_julia(s::AbstractString)
     )
         s = replace(
             s,
-            Regex(raw"(\w+)\s+" * kw * raw"\s+(\w+)") => SubstitutionString(jl * raw"(\1, \2)"),
+            Regex(raw"(\w+)\s+" * kw * raw"\s+(\w+)") =>
+                SubstitutionString(jl * raw"(\1, \2)"),
         )
     end
     return s
@@ -740,6 +763,25 @@ function clean_expression(expr::AbstractString)
         r"\(\s*if\s*((?:[^()]|\([^()]*\))+?)\s+then\s+((?:[^()]|\([^()]*\))+?)\s*\)" =>
             s"(\1 ? \2 : 0)",
     )
+    # Bare `if X then Y else Z` running to end of expression, no outer
+    # parens — used in b-pn2's `param v2 := if y == 1 then 1.0 else
+    # 0.0`. Iterate so nested `else if …` chains collapse.
+    while occursin(r"(?<![?])\bif\s*.+?\s+then\s.+?\s+else\s", expr)
+        new_expr = replace(
+            expr,
+            r"(?<![?])\bif\s*(.+?)\s+then\s+(.+?)\s+else\s+(.+)$" =>
+                s"(\1 ? \2 : (\3))",
+        )
+        new_expr == expr && break
+        expr = new_expr
+    end
+    # Final pass for bare `if X then Y` with no `else` — water-net's
+    # `hl := height[i] + if i in consumers then (...);`. Allow `\s*`
+    # after `then` because the lexer can drop the space before a `(`.
+    expr = replace(
+        expr,
+        r"(?<![?])\bif\s*(.+?)\s+then\s*(.+)$" => s"(\1 ? \2 : 0)",
+    )
     expr = _convert_complementarity(expr)
     return expr
 end
@@ -829,8 +871,10 @@ function _last_top_level_comparator(s::AbstractString)
             depth += 1
         elseif c in (')', ']', '}')
             depth -= 1
-        elseif depth == 0 && (c == '<' || c == '>') &&
-               i < last_idx && s[nextind(s, i)] == '='
+        elseif depth == 0 &&
+               (c == '<' || c == '>') &&
+               i < last_idx &&
+               s[nextind(s, i)] == '='
             last = i
         end
         i = nextind(s, i)
@@ -846,8 +890,9 @@ function _strip_complementarity_ub(s::AbstractString)
     # involving another expression (`design-cent-21`). Drop everything
     # past the last top-level `<=` / `>=`.
     op_start = _last_top_level_comparator(s)
-    inner = op_start === nothing ? String(s) :
-            String(strip(s[1:prevind(s, op_start)]))
+    inner =
+        op_start === nothing ? String(s) :
+        String(strip(s[1:prevind(s, op_start)]))
     return _strip_outer_parens(inner)
 end
 

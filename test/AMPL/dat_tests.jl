@@ -357,9 +357,13 @@ end
 # let command
 # ============================================================
 
-function test_let_command()
+function test_let_command_skipped()
+    # `let VAR := EXPR;` sets a variable's starting value (a JuMP
+    # `set_start_value` concept), not a parameter. parse_dat skips it
+    # so the variable name doesn't leak into the data dict as a bogus
+    # kwarg of `build_model`.
     data = JuMPConverter.AMPL.parse_dat("let x := 5;")
-    @test data["x"] == 5
+    @test !haskey(data, "x")
     return
 end
 

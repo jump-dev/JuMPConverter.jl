@@ -476,6 +476,79 @@ function test_set_default_translates_diff_to_setdiff()
     return
 end
 
+function test_param_indexed_assign_becomes_comprehension()
+    # water-net-style: `param hl{i in nodes} := height[i] + …;` — the
+    # default references the iter `i`. Emit as a `DenseAxisArray`
+    # comprehension so the kwarg default actually carries a value
+    # rather than `i`-as-an-undefined-name.
+    mod = """
+    set nodes;
+    param height {nodes};
+    param hl {i in nodes} := height[i] + 1;
+    var x {nodes};
+    minimize obj: sum {i in nodes} hl[i] * x[i];
+    subject to
+    c {i in nodes}: x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["hl"].default_expr == "height[i] + 1"
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "hl = JuMP.Containers.DenseAxisArray([height[i] + 1 for i in nodes], nodes)",
+    )
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_param_inline_assign_expression_becomes_default_expr()
+    # incid-set1-style: `param h := 1/n;` — RHS is an expression, not
+    # a literal. Emit the expression as the Julia kwarg default so
+    # `h` is computed from `n` at call time rather than becoming a
+    # required kwarg the .dat doesn't carry.
+    mod = """
+    param n integer;
+    param h := 1/n;
+    param Nnd := (n+1)*(n+1);
+    var x {1..Nnd};
+    minimize obj: sum {i in 1..Nnd} h * x[i];
+    subject to
+    c {i in 1..Nnd}: x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["h"].default === nothing
+    @test model.parameters["h"].default_expr == "1 / n"
+    @test model.parameters["Nnd"].default_expr == "(n + 1) * (n + 1)"
+    rendered = sprint(print, model)
+    @test contains(rendered, "h = 1 / n")
+    @test contains(rendered, "Nnd = (n + 1) * (n + 1)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_param_inline_assign_becomes_default()
+    # design-cent-1-style: `param pi := 3.14;` and b-pn2-style
+    # `param v1{Y} := 1;` initialize the parameter inline; treat the
+    # `:= VALUE` as the parameter's default so `build_model` doesn't
+    # demand a kwarg for it.
+    mod = """
+    set Y;
+    param pi := 3.141592654;
+    param v1 {Y} := 1;
+    var x;
+    minimize obj: pi * x;
+    subject to
+    c {y in Y}: v1[y] * x >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["pi"].default == 3.141592654
+    @test model.parameters["v1"].default == 1.0
+    rendered = sprint(print, model)
+    @test contains(rendered, "pi = 3.141592654")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 function test_variable_bound_then_init_value()
     # design-cent-1-style: `var l{k in K} >= 0 := l0[k];`. The `:=` is
     # an initial value, not part of the bound; the parser must stop the
