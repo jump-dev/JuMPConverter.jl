@@ -479,9 +479,50 @@ function _dat_parse_multi_column!(
     if isnothing(prefix_name)
         df_to_container!(data, df)
     else
-        data[prefix_name] = df
+        # `param A: 1 2 3 := …` is a 2D parameter with row labels in
+        # the index column and column labels in the header. Convert
+        # to a `DenseAxisArray` so `A[i, j]` returns a scalar rather
+        # than the DataFrame row tuple that JuMP can't multiply.
+        data[prefix_name] = _df_to_2d_container(df)
     end
     return
+end
+
+function _df_to_2d_container(df::DataFrames.DataFrame)
+    # `_dat_parse_multi_column!` packs row indices as `ntuple(...,
+    # num_indices)` — for the single-row-index case (`param A: c1 c2
+    # := …`) that gives 1-tuples like `(1,)` that JuMP can't look up
+    # by a scalar `A[1, c1]`. Unwrap so the row axis is the scalar.
+    raw_rows = df.index
+    rows =
+        eltype(raw_rows) <: NTuple{1,Any} ? [r[1] for r in raw_rows] : raw_rows
+    col_names = DataFrames.names(df)[2:end]
+    cols = [_any_parse(c) for c in col_names]
+    sz = (length(rows), length(cols))
+    mat = Matrix{Float64}(undef, sz)
+    has_missing = false
+    @inbounds for (j, col) in enumerate(col_names), i in axes(df, 1)
+        v = df[i, col]
+        if v isa Missing
+            has_missing = true
+            mat[i, j] = NaN
+        else
+            mat[i, j] = Float64(v)
+        end
+    end
+    if has_missing
+        dict = OrderedCollections.OrderedDict{
+            Tuple{eltype(rows),eltype(cols)},
+            Float64,
+        }()
+        @inbounds for (j, col) in enumerate(col_names), i in axes(df, 1)
+            v = df[i, col]
+            v isa Missing && continue
+            dict[(rows[i], cols[j])] = Float64(v)
+        end
+        return JuMP.Containers.SparseAxisArray(dict)
+    end
+    return JuMP.Containers.DenseAxisArray(mat, rows, cols)
 end
 
 function _determine_num_indices(
@@ -624,6 +665,59 @@ Parse AMPL .dat content using the tokenizer. Uses schema info to determine
 parameter dimensionality. Pass a `DatSchema`, a `JuMPConverter.Model`
 (converted to a `DatSchema`), or `nothing` (heuristic).
 """
+function _skip_to_semicolon!(lex::Lexer)
+    while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
+        read_token!(lex)
+    end
+    return
+end
+
+# Recognize `{i in S} VAR[i] := CONST;` and populate `data[VAR]` with
+# a `DenseAxisArray` over the (already-loaded) set `S`. Returns `true`
+# when the pattern matched (statement fully consumed up to and
+# including `;`), `false` if anything didn't fit so the caller can
+# fall back to a plain skip.
+function _try_parse_indexed_let_const!(lex::Lexer, data::Dict{String,Any})
+    peek(lex).kind == TOKEN_LBRACE || return false
+    read_token!(lex)
+    peek(lex).kind == TOKEN_IDENTIFIER || return false
+    iter_var = read_token!(lex).value
+    if !(peek(lex).kind == TOKEN_IDENTIFIER && peek(lex).value == "in")
+        return false
+    end
+    read_token!(lex)
+    peek(lex).kind == TOKEN_IDENTIFIER || return false
+    set_name = read_token!(lex).value
+    peek(lex).kind == TOKEN_RBRACE || return false
+    read_token!(lex)
+    peek(lex).kind == TOKEN_IDENTIFIER || return false
+    var_name = read_token!(lex).value
+    peek(lex).kind == TOKEN_LBRACKET || return false
+    read_token!(lex)
+    # Skip over the indices — we don't validate that they reference
+    # `iter_var`, since `let{i in S} A[i, 'y1'] := 0;` is also a
+    # reasonable shape.
+    while peek(lex).kind != TOKEN_RBRACKET && peek(lex).kind != TOKEN_EOF
+        read_token!(lex)
+    end
+    peek(lex).kind == TOKEN_RBRACKET || return false
+    read_token!(lex)
+    peek(lex).kind == TOKEN_ASSIGN || return false
+    read_token!(lex)
+    value = _read_dat_value!(lex)
+    value isa Number || return false
+    if peek(lex).kind == TOKEN_SEMICOLON
+        read_token!(lex)
+    end
+    set_val = get(data, set_name, nothing)
+    set_val isa AbstractVector || return true  # nothing to bind against
+    data[var_name] = JuMP.Containers.DenseAxisArray(
+        fill(Float64(value), length(set_val)),
+        set_val,
+    )
+    return true
+end
+
 function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
     data = Dict{String,Any}()
     lex = Lexer(text)
@@ -645,17 +739,16 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
             read_token!(lex)
             _dat_parse_set!(lex, data)
         elseif kw == "let"
-            # `let VAR := EXPR;` (and the indexed `let{i in S} VAR[i]
-            # := EXPR;` form) sets *variable* starting values, not
-            # parameter data. The starts would map to JuMP's
-            # `set_start_value`; for now just skip the statement so
-            # the variable name doesn't leak into the data dict as a
-            # bogus kwarg of `build_model`.
+            # `let{i in S} VAR[i] := CONST;` (incid-set's `let{i in
+            # bnd_nodes} u0[i] := 0.0;`) initializes an indexed
+            # parameter to a constant for every element of `S`.
+            # Anything more complex — scalar `let`, an expression RHS,
+            # conditional `let X := X union {k}` — is skipped, since
+            # the scalar form sets a variable start (a JuMP
+            # `set_start_value` concept) and the conditional needs
+            # AMPL expression evaluation we don't have.
             read_token!(lex)
-            while peek(lex).kind != TOKEN_SEMICOLON &&
-                peek(lex).kind != TOKEN_EOF
-                read_token!(lex)
-            end
+            _try_parse_indexed_let_const!(lex, data) || _skip_to_semicolon!(lex)
         elseif kw == "fix"
             # Data-section `fix VAR := V;` modifies model variables, not
             # data values. Stash structured fixes under `"fixes"` so the

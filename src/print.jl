@@ -71,28 +71,41 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
         if isnothing(p.axes)
             return "$(p.name) = $(p.default_expr)"
         end
-        # Indexed expression default — only the 1D simple-iter form
-        # has a clean Julia rendering as a `DenseAxisArray`
-        # comprehension. Multi-dim and tuple-iter forms (e.g. `param
-        # dist{(i, j) in arcs} := …`) need more machinery; drop the
-        # default and leave the kwarg required for now.
+        # Indexed expression default: a plain 1D iter becomes a
+        # `DenseAxisArray` comprehension; a tuple iter (`param dist
+        # {(i, j) in arcs} := …`) becomes a `SparseAxisArray` keyed
+        # by the tuple. Multi-axis forms aren't yet handled; drop
+        # the default and leave the kwarg required.
         if length(p.axes.axes) == 1
             a = p.axes.axes[1]
-            if !startswith(a.name, "(")
-                set = _ampl_range_to_julia(a.set)
+            set = _ampl_range_to_julia(a.set)
+            if startswith(a.name, "(")
+                return "$(p.name) = JuMP.Containers.SparseAxisArray(Dict($(a.name) => $(p.default_expr) for $(a.name) in $set))"
+            else
                 return "$(p.name) = JuMP.Containers.DenseAxisArray([$(p.default_expr) for $(a.name) in $set], $set)"
             end
         end
         return p.name
     end
     isnothing(p.default) && return p.name
+    rendered_default = _render_number(p.default)
     if isnothing(p.axes)
-        return "$(p.name) = $(p.default)"
+        return "$(p.name) = $rendered_default"
     end
     axes_strs = [_ampl_range_to_julia(a.set) for a in p.axes.axes]
     lengths = join(["length($a)" for a in axes_strs], ", ")
-    fill_call = "fill($(p.default), $lengths)"
+    fill_call = "fill($rendered_default, $lengths)"
     return "$(p.name) = JuMP.Containers.DenseAxisArray($fill_call, $(join(axes_strs, ", ")))"
+end
+
+# A Float64 whose value happens to be integral (`param NS := 12`)
+# renders as `12` rather than `12.0` so `1..NS` becomes a JuMP-friendly
+# `UnitRange{Int}` instead of `StepRangeLen{Float64, …}`.
+function _render_number(v::Float64)
+    if isfinite(v) && isinteger(v) && abs(v) < 2.0^53
+        return string(Int(v))
+    end
+    return string(v)
 end
 
 function _format_set_kwarg(s::Set, inline::Bool)

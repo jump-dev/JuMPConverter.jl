@@ -436,6 +436,28 @@ function test_conditional_expr_with_paren_else_operand()
     return
 end
 
+function test_set_within_defaults_to_empty()
+    # pack-comp1-style: `set fix_nodes within nodes;` — `fix_nodes`
+    # has no `:=`, so it would normally be a required kwarg, but the
+    # MacMPEC `.dat`s populate it via `let fix_nodes := { };` (we
+    # skip `let`). Default to empty so the call works (and `setdiff`
+    # downstream produces the full superset).
+    mod = """
+    set nodes;
+    set fix_nodes within nodes;
+    var x {nodes};
+    minimize obj: sum {i in nodes} x[i];
+    subject to
+    c {i in nodes}: x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["fix_nodes"].default == "Int[]"
+    rendered = sprint(print, model)
+    @test contains(rendered, "fix_nodes = Int[]")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 function test_set_default_brace_literal_to_vector()
     # tap-09-style: `set DEST := { 3 , 4 };` — Julia's `{}` is the
     # discontinued vector syntax; emit `[3, 4]` so the kwarg default
@@ -472,6 +494,52 @@ function test_set_default_translates_diff_to_setdiff()
     @test model.sets["int_nodes"].default == "setdiff(nodes, bnd_nodes)"
     rendered = sprint(print, model)
     @test contains(rendered, "int_nodes = setdiff(nodes, bnd_nodes)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_param_integral_default_renders_as_int()
+    # portfl-i-style: `param NS := 12;` — Float64 default whose value
+    # is integral must render as `12`, not `12.0`, so a downstream
+    # `1..NS` becomes `1:12` (`UnitRange{Int}`) rather than a
+    # `StepRangeLen{Float64, …}` JuMP can't accept.
+    mod = """
+    param NS := 12;
+    param NR := 62;
+    var x;
+    minimize obj: x;
+    subject to
+    c {i in 1..NS}: x >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "NS = 12,")
+    @test contains(rendered, "NR = 62)")  # last kwarg
+    @test !contains(rendered, "12.0")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_param_indexed_tuple_assign_becomes_sparse_axis_array()
+    # water-net-style: `param dist{(i, j) in arcs} := f(i, j);` — the
+    # iter is a tuple over a 2-set; emit as a `SparseAxisArray`
+    # keyed by the tuple so the kwarg default is a valid value
+    # rather than `i, j` undefined.
+    mod = """
+    set arcs within {1..3, 1..3};
+    param x {1..3};
+    param dist {(i, j) in arcs} := x[i] + x[j];
+    var z {arcs};
+    minimize obj: sum {(i, j) in arcs} dist[i, j] * z[i, j];
+    subject to
+    c {(i, j) in arcs}: z[i, j] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "dist = JuMP.Containers.SparseAxisArray(Dict((i, j) => x[i] + x[j] for (i, j) in arcs))",
+    )
     @test Meta.parseall(rendered) isa Expr
     return
 end
@@ -817,7 +885,7 @@ function test_set_declaration()
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0.0, length(PRODUCTS)), PRODUCTS))",
+        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0, length(PRODUCTS)), PRODUCTS))",
     )
     return
 end
@@ -858,7 +926,7 @@ function test_indexed_param_default_is_indexable_container()
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "ALPHA = JuMP.Containers.DenseAxisArray(fill(1.0, length(K)), K)",
+        "ALPHA = JuMP.Containers.DenseAxisArray(fill(1, length(K)), K)",
     )
     @test Meta.parseall(rendered) isa Expr
     return

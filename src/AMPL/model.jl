@@ -416,6 +416,7 @@ Skip set declarations (not stored in model currently).
 function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
     name = expect!(lex, TOKEN_IDENTIFIER).value
     default = nothing
+    within = false
     while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
         t = peek(lex)
         # `:=` is initialization, `=` is a derived-set definition; both
@@ -429,9 +430,19 @@ function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
             # (Julia's `{}` vector syntax is discontinued).
             cleaned = replace(cleaned, r"\{\s*([^{}]*?)\s*\}" => s"[\1]")
             default = _ampl_set_ops_to_julia(cleaned)
+        elseif t.kind == TOKEN_IDENTIFIER && t.value == "within"
+            # `set X within Y;` — X is a subset of Y. MacMPEC `.dat`s
+            # usually populate it via `let X := { }; let X := X union
+            # { k };` which we skip; default to empty so the kwarg is
+            # at least not required.
+            within = true
+            read_token!(lex)
         else
             read_token!(lex)
         end
+    end
+    if isnothing(default) && within
+        default = "Int[]"
     end
     push!(model, JuMPConverter.Set(; name, default))
     return

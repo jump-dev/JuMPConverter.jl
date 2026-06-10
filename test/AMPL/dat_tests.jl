@@ -367,6 +367,22 @@ function test_let_command_skipped()
     return
 end
 
+function test_indexed_let_const_populates_dense_axis_array()
+    # incid-set-style: `let{i in S} VAR[i] := CONST;` populates the
+    # indexed parameter with a constant value at every element of the
+    # already-loaded set `S`.
+    data = JuMPConverter.AMPL.parse_dat("""
+    set bnd_nodes := 1 2 3 ;
+    let{i in bnd_nodes} u0[i] := 0.0;
+    """)
+    u0 = data["u0"]
+    @test u0 isa JuMPConverter.JuMP.Containers.DenseAxisArray
+    @test u0[1] == 0.0
+    @test u0[2] == 0.0
+    @test u0[3] == 0.0
+    return
+end
+
 # ============================================================
 # Full example file with model context
 # ============================================================
