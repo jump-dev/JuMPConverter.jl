@@ -204,10 +204,22 @@ function _dat_parse_set!(lex::Lexer, data::Dict{String,Any})
             read_token!(lex)
             continue
         elseif t.kind == TOKEN_LPAREN
+            # `set arcs := (1, 2) (1, 3) …;` — read as a real tuple so
+            # downstream consumers can index `A[(i, j)]` / `A[i, j]`
+            # rather than getting a `"(1, 2)"` string.
             read_token!(lex)
-            inner =
-                read_balanced!(lex, TOKEN_LPAREN, TOKEN_RPAREN; compact = true)
-            push!(values, "(" * inner * ")")
+            items = Any[]
+            while peek(lex).kind != TOKEN_RPAREN && peek(lex).kind != TOKEN_EOF
+                if peek(lex).kind == TOKEN_COMMA
+                    read_token!(lex)
+                    continue
+                end
+                push!(items, _read_dat_value!(lex))
+            end
+            if peek(lex).kind == TOKEN_RPAREN
+                read_token!(lex)
+            end
+            push!(values, Tuple(items))
         else
             push!(values, _read_dat_value!(lex))
         end
@@ -231,6 +243,21 @@ function _dat_parse_param!(
     # Multi-column: `param : col1 col2 := ...`
     if t.kind == TOKEN_COLON
         read_token!(lex)
+        # `param: SETNAME: col1 col2 := …` (siouxfls, nash1) — the
+        # second `:` after an identifier means the table also defines
+        # the set whose elements are the row indices.
+        if peek(lex).kind == TOKEN_IDENTIFIER &&
+           peek(lex, 2).kind == TOKEN_COLON
+            set_name = read_token!(lex).value
+            read_token!(lex)  # consume second `:`
+            return _dat_parse_multi_column!(
+                lex,
+                data,
+                schema,
+                nothing;
+                set_name,
+            )
+        end
         return _dat_parse_multi_column!(lex, data, schema, nothing)
     end
     if t.kind != TOKEN_IDENTIFIER
@@ -374,7 +401,8 @@ function _dat_parse_multi_column!(
     lex::Lexer,
     data::Dict{String,Any},
     schema::Union{Nothing,DatSchema},
-    prefix_name::Union{Nothing,String},
+    prefix_name::Union{Nothing,String};
+    set_name::Union{Nothing,String} = nothing,
 )
     # Collect sections as (col_names, flat_values) pairs
     sections = Tuple{Vector{String},Vector{Any}}[]
@@ -423,9 +451,17 @@ function _dat_parse_multi_column!(
         end
     end
 
-    # Determine num_indices (row index dimensions)
-    num_indices =
-        _determine_num_indices(schema, prefix_name, all_col_names, sections)
+    # Determine num_indices (row index dimensions). For `param: SET:
+    # cols := …` the schema doesn't know the set's tuple-arity, so
+    # fall straight through to the row-layout heuristic — and prefer
+    # the largest fitting ni since the row indices are a tuple.
+    num_indices = _determine_num_indices(
+        set_name === nothing ? schema : nothing,
+        prefix_name,
+        all_col_names,
+        sections;
+        set_name,
+    )
 
     # Parse rows from each section
     # Key type: NTuple{num_indices,Int} or String
@@ -479,16 +515,63 @@ function _dat_parse_multi_column!(
     if isnothing(prefix_name)
         df_to_container!(data, df)
     else
-        data[prefix_name] = df
+        # `param A: 1 2 3 := …` is a 2D parameter with row labels in
+        # the index column and column labels in the header. Convert
+        # to a `DenseAxisArray` so `A[i, j]` returns a scalar rather
+        # than the DataFrame row tuple that JuMP can't multiply.
+        data[prefix_name] = _df_to_2d_container(df)
+    end
+    if set_name !== nothing
+        # `param: SETNAME: c1 c2 := …` also declares the set from the
+        # row indices.
+        data[set_name] = _convert_to_concrete_eltype(collect(df.index))
     end
     return
+end
+
+function _df_to_2d_container(df::DataFrames.DataFrame)
+    # `_dat_parse_multi_column!` packs row indices as `ntuple(...,
+    # num_indices)` — for the single-row-index case (`param A: c1 c2
+    # := …`) that gives 1-tuples like `(1,)` that JuMP can't look up
+    # by a scalar `A[1, c1]`. Unwrap so the row axis is the scalar.
+    raw_rows = df.index
+    rows =
+        eltype(raw_rows) <: NTuple{1,Any} ? [r[1] for r in raw_rows] : raw_rows
+    col_names = DataFrames.names(df)[2:end]
+    cols = [_any_parse(c) for c in col_names]
+    sz = (length(rows), length(cols))
+    mat = Matrix{Float64}(undef, sz)
+    has_missing = false
+    @inbounds for (j, col) in enumerate(col_names), i in axes(df, 1)
+        v = df[i, col]
+        if v isa Missing
+            has_missing = true
+            mat[i, j] = NaN
+        else
+            mat[i, j] = Float64(v)
+        end
+    end
+    if has_missing
+        dict = OrderedCollections.OrderedDict{
+            Tuple{eltype(rows),eltype(cols)},
+            Float64,
+        }()
+        @inbounds for (j, col) in enumerate(col_names), i in axes(df, 1)
+            v = df[i, col]
+            v isa Missing && continue
+            dict[(rows[i], cols[j])] = Float64(v)
+        end
+        return JuMP.Containers.SparseAxisArray(dict)
+    end
+    return JuMP.Containers.DenseAxisArray(mat, rows, cols)
 end
 
 function _determine_num_indices(
     schema::Union{Nothing,DatSchema},
     prefix_name::Union{Nothing,String},
     all_col_names::Vector{String},
-    sections::Vector{Tuple{Vector{String},Vector{Any}}},
+    sections::Vector{Tuple{Vector{String},Vector{Any}}};
+    set_name::Union{Nothing,String} = nothing,
 )
     # From schema info (most reliable)
     if !isnothing(schema) && !isnothing(prefix_name)
@@ -503,11 +586,15 @@ function _determine_num_indices(
             return nd  # unnamed: all dims come from row indices
         end
     end
-    # Heuristic: try num_indices 1, 2, 3 against first section
+    # Heuristic: try num_indices against the first section. For
+    # `param: SETNAME: …` prefer the largest fitting ni — the row
+    # indices are a tuple of unknown arity, and ni=1 also fits any
+    # row whose total length happens to divide by `1 + num_cols`.
+    ni_order = set_name === nothing ? (1:3) : (3:-1:1)
     if !isempty(sections)
         first_cols, first_vals = sections[1]
         num_cols = length(first_cols)
-        for ni in 1:3
+        for ni in ni_order
             rs = ni + num_cols
             (isempty(first_vals) || length(first_vals) % rs != 0) && continue
             ok = true
@@ -624,6 +711,59 @@ Parse AMPL .dat content using the tokenizer. Uses schema info to determine
 parameter dimensionality. Pass a `DatSchema`, a `JuMPConverter.Model`
 (converted to a `DatSchema`), or `nothing` (heuristic).
 """
+function _skip_to_semicolon!(lex::Lexer)
+    while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
+        read_token!(lex)
+    end
+    return
+end
+
+# Recognize `{i in S} VAR[i] := CONST;` and populate `data[VAR]` with
+# a `DenseAxisArray` over the (already-loaded) set `S`. Returns `true`
+# when the pattern matched (statement fully consumed up to and
+# including `;`), `false` if anything didn't fit so the caller can
+# fall back to a plain skip.
+function _try_parse_indexed_let_const!(lex::Lexer, data::Dict{String,Any})
+    peek(lex).kind == TOKEN_LBRACE || return false
+    read_token!(lex)
+    peek(lex).kind == TOKEN_IDENTIFIER || return false
+    iter_var = read_token!(lex).value
+    if !(peek(lex).kind == TOKEN_IDENTIFIER && peek(lex).value == "in")
+        return false
+    end
+    read_token!(lex)
+    peek(lex).kind == TOKEN_IDENTIFIER || return false
+    set_name = read_token!(lex).value
+    peek(lex).kind == TOKEN_RBRACE || return false
+    read_token!(lex)
+    peek(lex).kind == TOKEN_IDENTIFIER || return false
+    var_name = read_token!(lex).value
+    peek(lex).kind == TOKEN_LBRACKET || return false
+    read_token!(lex)
+    # Skip over the indices — we don't validate that they reference
+    # `iter_var`, since `let{i in S} A[i, 'y1'] := 0;` is also a
+    # reasonable shape.
+    while peek(lex).kind != TOKEN_RBRACKET && peek(lex).kind != TOKEN_EOF
+        read_token!(lex)
+    end
+    peek(lex).kind == TOKEN_RBRACKET || return false
+    read_token!(lex)
+    peek(lex).kind == TOKEN_ASSIGN || return false
+    read_token!(lex)
+    value = _read_dat_value!(lex)
+    value isa Number || return false
+    if peek(lex).kind == TOKEN_SEMICOLON
+        read_token!(lex)
+    end
+    set_val = get(data, set_name, nothing)
+    set_val isa AbstractVector || return true  # nothing to bind against
+    data[var_name] = JuMP.Containers.DenseAxisArray(
+        fill(Float64(value), length(set_val)),
+        set_val,
+    )
+    return true
+end
+
 function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
     data = Dict{String,Any}()
     lex = Lexer(text)
@@ -645,16 +785,16 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
             read_token!(lex)
             _dat_parse_set!(lex, data)
         elseif kw == "let"
+            # `let{i in S} VAR[i] := CONST;` (incid-set's `let{i in
+            # bnd_nodes} u0[i] := 0.0;`) initializes an indexed
+            # parameter to a constant for every element of `S`.
+            # Anything more complex — scalar `let`, an expression RHS,
+            # conditional `let X := X union {k}` — is skipped, since
+            # the scalar form sets a variable start (a JuMP
+            # `set_start_value` concept) and the conditional needs
+            # AMPL expression evaluation we don't have.
             read_token!(lex)
-            if peek(lex).kind == TOKEN_LBRACE
-                # Indexed let: let{s in S} name[idx] := expr; — skip
-                while peek(lex).kind != TOKEN_SEMICOLON &&
-                    peek(lex).kind != TOKEN_EOF
-                    read_token!(lex)
-                end
-            else
-                _dat_parse_param!(lex, data, schema)
-            end
+            _try_parse_indexed_let_const!(lex, data) || _skip_to_semicolon!(lex)
         elseif kw == "fix"
             # Data-section `fix VAR := V;` modifies model variables, not
             # data values. Stash structured fixes under `"fixes"` so the

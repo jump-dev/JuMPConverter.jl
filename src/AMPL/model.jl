@@ -83,12 +83,24 @@ end
 Read tokens until a stop token kind is reached, returning the expression
 text. Handles balanced braces/brackets/parens within.
 """
-function _read_expression!(lex::Lexer, stops::NTuple{N,TokenKind}) where {N}
+function _read_expression!(
+    lex::Lexer,
+    stops::NTuple{N,TokenKind};
+    stop_at_complements::Bool = false,
+) where {N}
     parts = String[]
     prev_kind = nothing
     while true
         t = peek(lex)
         if t.kind in stops || t.kind == TOKEN_EOF
+            break
+        end
+        # When called from `_read_summation!`, stop at the `complements`
+        # keyword so the sum body doesn't swallow the variable side of
+        # an enclosing complementarity constraint.
+        if stop_at_complements &&
+           t.kind == TOKEN_IDENTIFIER &&
+           t.value == "complements"
             break
         end
         # AMPL `sum {idx} body` / `prod {idx} body` → Julia generator syntax.
@@ -184,8 +196,13 @@ function _read_summation!(lex::Lexer, op::String, outer_stops)
     # `*`, `/`, `^` and indexing/parens but stops at `+`, `-`, comparisons,
     # commas, or the outer expression's stop tokens.
     body_stops = (outer_stops..., _SUM_TERMINATORS...)
-    body = strip(_read_expression!(lex, body_stops))
-    body = _strip_outer_parens(body)
+    body = strip(_read_expression!(lex, body_stops; stop_at_complements = true))
+    # Keep the outer parens around an `(if … then … [else …])` body so
+    # the ternary-conversion regex matches the if/then pair, not the
+    # enclosing `sum(... for …)` parens.
+    if !startswith(body, "(if ") && !startswith(body, "(if(")
+        body = _strip_outer_parens(body)
+    end
     idx = _ampl_index_to_julia(idx)
     return "$op($body for $idx)"
 end
@@ -231,6 +248,7 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
     name = expect!(lex, TOKEN_IDENTIFIER).value
     axes = _read_axes!(lex)
     default = nothing
+    default_expr = nothing
     integer = false
     # Parse optional qualifiers until semicolon
     while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
@@ -238,6 +256,22 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
         if t.kind == TOKEN_IDENTIFIER && t.value == "default"
             read_token!(lex)
             default = parse(Float64, _read_expression!(lex, (TOKEN_SEMICOLON,)))
+        elseif t.kind == TOKEN_ASSIGN
+            # `param NAME := VALUE;` — inline assignment. Numeric
+            # literal becomes the `default` (design-cent-1's
+            # `pi := 3.141592654`); an expression becomes
+            # `default_expr` so the generated kwarg can carry it
+            # (incid-set1's `h := 1/n`). Stop at `,` too because AMPL
+            # allows trailing qualifiers (taxmcp's
+            # `param kbar := 1, > 0;`).
+            read_token!(lex)
+            rhs = strip(_read_expression!(lex, (TOKEN_SEMICOLON, TOKEN_COMMA)))
+            parsed = tryparse(Float64, rhs)
+            if parsed !== nothing
+                default = parsed
+            else
+                default_expr = clean_expression(String(rhs))
+            end
         elseif t.kind == TOKEN_IDENTIFIER && t.value == "integer"
             read_token!(lex)
             integer = true
@@ -257,7 +291,8 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
             read_token!(lex)
             while true
                 nx = peek(lex)
-                if nx.kind in (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_EOF)
+                if nx.kind in
+                   (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_EOF, TOKEN_ASSIGN)
                     break
                 elseif nx.kind == TOKEN_IDENTIFIER && nx.value in
                        ("default", "integer", "binary", "symbolic", "in")
@@ -283,7 +318,10 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
             read_token!(lex)
         end
     end
-    push!(model, JuMPConverter.Parameter(; name, axes, integer, default))
+    push!(
+        model,
+        JuMPConverter.Parameter(; name, axes, integer, default, default_expr),
+    )
     return
 end
 
@@ -304,19 +342,32 @@ function _parse_var!(lex::Lexer, model::JuMPConverter.Model)
         t = peek(lex)
         if t.kind == TOKEN_GEQ
             read_token!(lex)
-            # Stop at the opposite-direction comparator too, so AMPL's
-            # `var x >= LB <= UB;` (no comma between the bounds) gets
-            # split into separate lb and ub instead of one swallowed
-            # `"LB <= UB"` expression.
+            # Stop at the opposite-direction comparator too (`var x
+            # >= LB <= UB;` needs to split into two bounds, not one
+            # swallowed `"LB <= UB"`) and at `:=` so the trailing
+            # initial value (`var x >= 0 := x0;`) doesn't get glued
+            # onto the lower bound.
             lower_bound = _read_expression!(
                 lex,
-                (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_LEQ, TOKEN_GEQ),
+                (
+                    TOKEN_SEMICOLON,
+                    TOKEN_COMMA,
+                    TOKEN_LEQ,
+                    TOKEN_GEQ,
+                    TOKEN_ASSIGN,
+                ),
             )
         elseif t.kind == TOKEN_LEQ
             read_token!(lex)
             upper_bound = _read_expression!(
                 lex,
-                (TOKEN_SEMICOLON, TOKEN_COMMA, TOKEN_LEQ, TOKEN_GEQ),
+                (
+                    TOKEN_SEMICOLON,
+                    TOKEN_COMMA,
+                    TOKEN_LEQ,
+                    TOKEN_GEQ,
+                    TOKEN_ASSIGN,
+                ),
             )
         elseif t.kind == TOKEN_IDENTIFIER && t.value == "binary"
             read_token!(lex)
@@ -365,19 +416,56 @@ Skip set declarations (not stored in model currently).
 function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
     name = expect!(lex, TOKEN_IDENTIFIER).value
     default = nothing
+    within = false
     while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
         t = peek(lex)
-        if t.kind == TOKEN_ASSIGN
+        # `:=` is initialization, `=` is a derived-set definition; both
+        # supply a default for our purposes.
+        if t.kind == TOKEN_ASSIGN || t.kind == TOKEN_EQ
             read_token!(lex)
             raw = strip(_read_expression!(lex, (TOKEN_SEMICOLON,)))
             # AMPL set ranges use `..`; Julia's UnitRange uses `:`.
-            default = replace(String(raw), ".." => ":")
+            cleaned = replace(String(raw), ".." => ":")
+            # AMPL set literal `{ 3, 4 }` → Julia Vector `[3, 4]`
+            # (Julia's `{}` vector syntax is discontinued).
+            cleaned = replace(cleaned, r"\{\s*([^{}]*?)\s*\}" => s"[\1]")
+            default = _ampl_set_ops_to_julia(cleaned)
+        elseif t.kind == TOKEN_IDENTIFIER && t.value == "within"
+            # `set X within Y;` — X is a subset of Y. MacMPEC `.dat`s
+            # usually populate it via `let X := { }; let X := X union
+            # { k };` which we skip; default to empty so the kwarg is
+            # at least not required.
+            within = true
+            read_token!(lex)
         else
             read_token!(lex)
         end
     end
+    if isnothing(default) && within
+        default = "Int[]"
+    end
     push!(model, JuMPConverter.Set(; name, default))
     return
+end
+
+# AMPL binary set operators → Julia equivalents. Only handles
+# simple-identifier operands (`A diff B`), which is what the MacMPEC
+# `.mod`s exercise; more general operands would need actual operator
+# parsing rather than a regex sub.
+function _ampl_set_ops_to_julia(s::AbstractString)
+    for (kw, jl) in (
+        "diff" => "setdiff",
+        "symdiff" => "symdiff",
+        "union" => "union",
+        "inter" => "intersect",
+    )
+        s = replace(
+            s,
+            Regex(raw"(\w+)\s+" * kw * raw"\s+(\w+)") =>
+                SubstitutionString(jl * raw"(\1, \2)"),
+        )
+    end
+    return s
 end
 
 """
@@ -655,6 +743,56 @@ function clean_expression(expr::AbstractString)
     # AMPL uses bare `=` for equality constraints; JuMP requires `==`.
     # Don't touch `<=`, `>=`, `:=`, `!=`, or an existing `==`.
     expr = replace(expr, r"(?<![<>:!=])=(?!=)" => "==")
+    # AMPL logical keywords: `and`/`or`/`not` → `&&`/`||`/`!`.
+    expr = replace(expr, r"\band\b" => "&&")
+    expr = replace(expr, r"\bor\b" => "||")
+    expr = replace(expr, r"\bnot\b" => "!")
+    expr = _ampl_set_ops_to_julia(expr)
+    # AMPL conditional `if COND then THEN else ELSE` → Julia ternary.
+    # Two patterns cover the MacMPEC shapes: a fully paren-bounded
+    # form with non-paren operands, and an `else (PAREN_EXPR)` form
+    # where the else operand carries its own parens (any surrounding
+    # context, e.g. a `sum(... for …)`, is left intact).
+    expr = replace(
+        expr,
+        # `[^()]|\([^()]*\)` lets each operand contain one level of
+        # balanced parens (`(i, j) in TOLL`), as in tollmpec.
+        # The lexer drops whitespace between `if` and a following `(`
+        # (tollmpec emits `if(i, j)`), so allow `\s*` there.
+        r"\(\s*if\s*((?:[^()]|\([^()]*\))+?)\s+then\s+((?:[^()]|\([^()]*\))+?)\s+else\s+((?:[^()]|\([^()]*\))+?)\s*\)" =>
+            s"(\1 ? \2 : \3)",
+    )
+    expr = replace(
+        expr,
+        r"\bif\s*(.+?)\s+then\s+(.+?)\s+else\s*(\([^()]*(?:\([^()]*\)[^()]*)*\))" =>
+            s"(\1 ? \2 : \3)",
+    )
+    # `(if X then Y)` with no `else` — AMPL treats the missing branch
+    # as 0 (water-net's `+ (if i in reservoirs then s[i])`).
+    expr = replace(
+        expr,
+        r"\(\s*if\s*((?:[^()]|\([^()]*\))+?)\s+then\s+((?:[^()]|\([^()]*\))+?)\s*\)" =>
+            s"(\1 ? \2 : 0)",
+    )
+    # Bare `if X then Y else Z` running to end of expression, no outer
+    # parens — used in b-pn2's `param v2 := if y == 1 then 1.0 else
+    # 0.0`. Iterate so nested `else if …` chains collapse.
+    while occursin(r"(?<![?])\bif\s*.+?\s+then\s.+?\s+else\s", expr)
+        new_expr = replace(
+            expr,
+            r"(?<![?])\bif\s*(.+?)\s+then\s+(.+?)\s+else\s+(.+)$" =>
+                s"(\1 ? \2 : (\3))",
+        )
+        new_expr == expr && break
+        expr = new_expr
+    end
+    # Final pass for bare `if X then Y` with no `else` — water-net's
+    # `hl := height[i] + if i in consumers then (...);`. Allow `\s*`
+    # after `then` because the lexer can drop the space before a `(`.
+    expr = replace(
+        expr,
+        r"(?<![?])\bif\s*(.+?)\s+then\s*(.+)$" => s"(\1 ? \2 : 0)",
+    )
     expr = _convert_complementarity(expr)
     return expr
 end
@@ -667,8 +805,25 @@ function _convert_complementarity(expr::AbstractString)
     contains(expr, "\u27c2") || return expr
     parts = split(expr, "\u27c2")
     length(parts) == 2 || return expr
-    lhs = _strip_complementarity_lb(strip(parts[1]))
-    rhs = _strip_complementarity_ub(strip(parts[2]))
+    lhs_raw = strip(parts[1])
+    rhs_raw = strip(parts[2])
+    # `0 == EXPR \u27c2 VAR` (KKT stationarity in AMPL) is degenerate
+    # complementarity: the left side is already an equality, so the
+    # `\u27c2` part is redundant for JuMP. Emit the plain equality.
+    if (m = match(r"^0\s*==\s*(.*)$"s, lhs_raw)) !== nothing
+        return strip(m.captures[1]) * " == 0"
+    end
+    stripped_lhs = _strip_complementarity_lb(lhs_raw)
+    if stripped_lhs == lhs_raw
+        # No leading numeric bound — this isn't `LB <= VAR <= UB`;
+        # it's a relation `EXPR1 OP EXPR2` (e.g. taxmcp's
+        # `PK * kbar >= sum(...)`). Convert to a subtraction so JuMP
+        # sees one expression on each side of `⟂`.
+        lhs = _relation_to_difference(lhs_raw)
+    else
+        lhs = _strip_complementarity_lhs_ub(stripped_lhs)
+    end
+    rhs = _strip_complementarity_ub(rhs_raw)
     if !_is_simple_variable_ref(lhs) && _is_simple_variable_ref(rhs)
         return "$lhs \u27c2 $rhs"
     elseif _is_simple_variable_ref(lhs) && !_is_simple_variable_ref(rhs)
@@ -677,14 +832,78 @@ function _convert_complementarity(expr::AbstractString)
     return "$lhs \u27c2 $rhs"
 end
 
+# The lexer emits `-10` as two tokens (`-`, `10`), so the rendered
+# expression strings have `- 10` with a space — the `-?\s*` pattern
+# tolerates that.
+const _NUMBER_RE = raw"-?\s*\d+(?:\.\d+)?"
+
 function _strip_complementarity_lb(s::AbstractString)
-    m = match(r"^0\s*<=\s*(.*)$"s, s)
+    # Strip a leading numeric bound: `0 <=`, `-10 <=`, or the
+    # mirror-image `0 >=` / `5 >=` form (some `.mod`s write the bound
+    # with the larger side on the left).
+    m = match(Regex("^" * _NUMBER_RE * raw"\s*(?:<=|>=)\s*(.*)$", "s"), s)
     return m === nothing ? String(s) : strip(m.captures[1])
 end
 
+function _strip_complementarity_lhs_ub(s::AbstractString)
+    # When the AMPL form is `LB <= EXPR <= UB ⟂ VAR`, the trailing
+    # `<= UB` lives on the LHS. JuMP rejects this mixed comparison
+    # chain; strip it. The UB can be a number (`bilevel1m`'s `<= 20`)
+    # or an expression (`design-cent-21`'s `<= x[4]^2 * x[3]^2`), so
+    # locate the last top-level `<=` / `>=` and drop everything from
+    # there onward.
+    op_start = _last_top_level_comparator(s)
+    op_start === nothing && return String(s)
+    return String(strip(s[1:prevind(s, op_start)]))
+end
+
+# Convert `A >= B` / `A <= B` / `A == B` at the top level into the
+# difference JuMP wants on one side of `⟂`. For taxmcp's `PK * kbar >=
+# sum(...)` this becomes `PK * kbar - (sum(...))`; for `0 = LHS` it's
+# already handled earlier by the equality short-circuit.
+function _relation_to_difference(s::AbstractString)
+    op_start = _last_top_level_comparator(s)
+    op_start === nothing && return String(s)
+    op_end = nextind(s, op_start)
+    op_char = s[op_start]
+    a = String(strip(s[1:prevind(s, op_start)]))
+    b = String(strip(s[nextind(s, op_end):end]))
+    return op_char == '<' ? "$b - ($a)" : "$a - ($b)"
+end
+
+function _last_top_level_comparator(s::AbstractString)
+    depth = 0
+    last = nothing
+    i = firstindex(s)
+    last_idx = lastindex(s)
+    while i <= last_idx
+        c = s[i]
+        if c in ('(', '[', '{')
+            depth += 1
+        elseif c in (')', ']', '}')
+            depth -= 1
+        elseif depth == 0 &&
+               (c == '<' || c == '>') &&
+               i < last_idx &&
+               s[nextind(s, i)] == '='
+            last = i
+        end
+        i = nextind(s, i)
+    end
+    return last
+end
+
 function _strip_complementarity_ub(s::AbstractString)
-    m = match(r"^(.*?)\s*>=\s*0\s*$"s, s)
-    inner = m === nothing ? String(s) : strip(m.captures[1])
+    # Strip a trailing bound from the right side of `⟂`. On the
+    # variable side it's a redundant restatement of the variable's
+    # declared bound (`m_c11 <= 0`, `y >= 0`); on the expression side
+    # it's a bound captured by the complementary variable, possibly
+    # involving another expression (`design-cent-21`). Drop everything
+    # past the last top-level `<=` / `>=`.
+    op_start = _last_top_level_comparator(s)
+    inner =
+        op_start === nothing ? String(s) :
+        String(strip(s[1:prevind(s, op_start)]))
     return _strip_outer_parens(inner)
 end
 

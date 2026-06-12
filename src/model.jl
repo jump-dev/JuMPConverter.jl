@@ -13,6 +13,11 @@ Base.@kwdef struct Parameter
     axes::Union{Nothing,Axes} = nothing
     integer::Bool
     default::Union{Nothing,Float64} = nothing
+    # AMPL's `param NAME := EXPR;` form lets the value be any AMPL
+    # expression (`param h := 1/n;`). When `EXPR` isn't a numeric
+    # literal we store it here as a Julia source string so the
+    # generated kwarg can carry the expression itself as its default.
+    default_expr::Union{Nothing,String} = nothing
 end
 
 Base.@kwdef struct Set
@@ -66,6 +71,11 @@ end
 mutable struct Model
     sets::OrderedCollections.OrderedDict{String,Set}
     parameters::OrderedCollections.OrderedDict{String,Parameter}
+    # Original `.mod` declaration order for sets + params combined,
+    # so the generated `build_model`'s kwargs land in dependency-safe
+    # order (a set default can reference a param declared above it
+    # and vice versa).
+    kwarg_order::Vector{Tuple{Symbol,String}}
     variables::OrderedCollections.OrderedDict{String,Variable}
     objective::Union{Nothing,Objective}
     constraints::Vector{Constraint}
@@ -89,6 +99,7 @@ mutable struct Model
         return new(
             OrderedCollections.OrderedDict{String,Set}(),
             OrderedCollections.OrderedDict{String,Parameter}(),
+            Tuple{Symbol,String}[],
             OrderedCollections.OrderedDict{String,Variable}(),
             nothing,
             Constraint[],
@@ -101,11 +112,14 @@ mutable struct Model
 end
 
 function Base.push!(model::Model, set::Set)
+    haskey(model.sets, set.name) || push!(model.kwarg_order, (:set, set.name))
     model.sets[set.name] = set
     return model
 end
 
 function Base.push!(model::Model, parameter::Parameter)
+    haskey(model.parameters, parameter.name) ||
+        push!(model.kwarg_order, (:param, parameter.name))
     model.parameters[parameter.name] = parameter
     return model
 end
