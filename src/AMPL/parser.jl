@@ -209,8 +209,7 @@ function _dat_parse_set!(lex::Lexer, data::Dict{String,Any})
             # rather than getting a `"(1, 2)"` string.
             read_token!(lex)
             items = Any[]
-            while peek(lex).kind != TOKEN_RPAREN &&
-                      peek(lex).kind != TOKEN_EOF
+            while peek(lex).kind != TOKEN_RPAREN && peek(lex).kind != TOKEN_EOF
                 if peek(lex).kind == TOKEN_COMMA
                     read_token!(lex)
                     continue
