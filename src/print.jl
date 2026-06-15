@@ -66,14 +66,46 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
     if inline
         return "$(p.name) = _INLINE_DATA[\"$(p.name)\"]"
     end
+    if !isnothing(p.default_expr)
+        # Expression default (`param h := 1/n;`).
+        if isnothing(p.axes)
+            return "$(p.name) = $(p.default_expr)"
+        end
+        # Indexed expression default: a plain 1D iter becomes a
+        # `DenseAxisArray` comprehension; a tuple iter (`param dist
+        # {(i, j) in arcs} := …`) becomes a `SparseAxisArray` keyed
+        # by the tuple. Multi-axis forms aren't yet handled; drop
+        # the default and leave the kwarg required.
+        if length(p.axes.axes) == 1
+            a = p.axes.axes[1]
+            set = _ampl_range_to_julia(a.set)
+            if startswith(a.name, "(")
+                return "$(p.name) = JuMP.Containers.SparseAxisArray(Dict($(a.name) => $(p.default_expr) for $(a.name) in $set))"
+            else
+                return "$(p.name) = JuMP.Containers.DenseAxisArray([$(p.default_expr) for $(a.name) in $set], $set)"
+            end
+        end
+        return p.name
+    end
     isnothing(p.default) && return p.name
+    rendered_default = _render_number(p.default)
     if isnothing(p.axes)
-        return "$(p.name) = $(p.default)"
+        return "$(p.name) = $rendered_default"
     end
     axes_strs = [_ampl_range_to_julia(a.set) for a in p.axes.axes]
     lengths = join(["length($a)" for a in axes_strs], ", ")
-    fill_call = "fill($(p.default), $lengths)"
+    fill_call = "fill($rendered_default, $lengths)"
     return "$(p.name) = JuMP.Containers.DenseAxisArray($fill_call, $(join(axes_strs, ", ")))"
+end
+
+# A Float64 whose value happens to be integral (`param NS := 12`)
+# renders as `12` rather than `12.0` so `1..NS` becomes a JuMP-friendly
+# `UnitRange{Int}` instead of `StepRangeLen{Float64, …}`.
+function _render_number(v::Float64)
+    if isfinite(v) && isinteger(v) && abs(v) < 2.0^53
+        return string(Int(v))
+    end
+    return string(v)
 end
 
 function _format_set_kwarg(s::Set, inline::Bool)
@@ -166,11 +198,20 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     end
     print(io, "function build_model(")
     kwargs = String[]
-    for s in values(model.sets)
-        push!(kwargs, _format_set_kwarg(s, s.name in inline))
-    end
-    for p in values(model.parameters)
-        push!(kwargs, _format_param_kwarg(p, p.name in inline))
+    # Iterate sets + params in their original `.mod` declaration order
+    # so a kwarg's default expression can rely on every name declared
+    # above it being already bound (works in both directions:
+    # `set nodes := 1..Nnd` after `param Nnd := …`, and
+    # `param hl{i in nodes} := …` after `set nodes`).
+    for (kind, name) in model.kwarg_order
+        if kind === :param
+            push!(
+                kwargs,
+                _format_param_kwarg(model.parameters[name], name in inline),
+            )
+        else
+            push!(kwargs, _format_set_kwarg(model.sets[name], name in inline))
+        end
     end
     for fx in model.parametric_fixes
         push!(kwargs, "$(JuMPConverter.AMPL.fix_kwarg_name(fx)) = nothing")
