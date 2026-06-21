@@ -26,8 +26,8 @@ function test_io(reader, input_dir, output_dir; ext::String = "")
             open(tmp, "w") do io
                 return println(io, model)
             end
-            JuliaFormatter.format_file(tmp)
-            JuliaFormatter.format_file(tmp)
+            JuliaFormatter.format(tmp)
+            JuliaFormatter.format(tmp)
             test_files(tmp, joinpath(output_dir, base_name * ".jl"))
         end
     end
