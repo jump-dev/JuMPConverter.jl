@@ -669,7 +669,7 @@ function parse_model(mod::AbstractString)
             # Other keywords: skip until semicolon
             read_token!(lex)
             while peek(lex).kind != TOKEN_SEMICOLON &&
-                peek(lex).kind != TOKEN_EOF
+                  peek(lex).kind != TOKEN_EOF
                 read_token!(lex)
             end
         else

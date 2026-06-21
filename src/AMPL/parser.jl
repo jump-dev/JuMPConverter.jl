@@ -411,8 +411,8 @@ function _dat_parse_multi_column!(
         # Read column names for this section until :=
         section_cols = String[]
         while peek(lex).kind != TOKEN_ASSIGN &&
-                  peek(lex).kind != TOKEN_SEMICOLON &&
-                  peek(lex).kind != TOKEN_EOF
+              peek(lex).kind != TOKEN_SEMICOLON &&
+              peek(lex).kind != TOKEN_EOF
             t = read_token!(lex)
             if t.kind == TOKEN_IDENTIFIER ||
                t.kind == TOKEN_STRING ||
@@ -648,8 +648,8 @@ function _dat_parse_slice!(lex::Lexer, data::Dict{String,Any}, name::String)
         expect!(lex, TOKEN_COLON)
         col_indices = Int[]
         while peek(lex).kind != TOKEN_ASSIGN &&
-                  peek(lex).kind != TOKEN_SEMICOLON &&
-                  peek(lex).kind != TOKEN_EOF
+              peek(lex).kind != TOKEN_SEMICOLON &&
+              peek(lex).kind != TOKEN_EOF
             t = read_token!(lex)
             if t.kind == TOKEN_NUMBER
                 push!(col_indices, parse(Int, t.value))
@@ -663,8 +663,8 @@ function _dat_parse_slice!(lex::Lexer, data::Dict{String,Any}, name::String)
             max(dim_sizes[2], isempty(col_indices) ? 0 : maximum(col_indices))
         # Read data rows until next [ or ;
         while peek(lex).kind != TOKEN_LBRACKET &&
-                  peek(lex).kind != TOKEN_SEMICOLON &&
-                  peek(lex).kind != TOKEN_EOF
+              peek(lex).kind != TOKEN_SEMICOLON &&
+              peek(lex).kind != TOKEN_EOF
             t = peek(lex)
             if t.kind == TOKEN_NUMBER || t.kind == TOKEN_MINUS
                 # Read row: row_idx val1 val2 ...
