@@ -594,6 +594,32 @@ function test_param_inline_assign_expression_becomes_default_expr()
     return
 end
 
+function test_param_default_expression_becomes_default_expr()
+    # cont5_1-style: `param m default n;` and ex6_160-style
+    # `param pi default 4*atan(1);` — a `default` whose value is an
+    # expression rather than a numeric literal must become the Julia
+    # kwarg default expression, exactly like `:=`.
+    mod = """
+    param n default 200;
+    param m default n;
+    param pi default 4*atan(1);
+    var x;
+    minimize obj: pi * x;
+    subject to
+    c {i in 1..m}: x >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["n"].default == 200.0
+    @test model.parameters["m"].default === nothing
+    @test model.parameters["m"].default_expr == "n"
+    @test model.parameters["pi"].default_expr == "4 * atan(1)"
+    rendered = sprint(print, model)
+    @test contains(rendered, "m = n")
+    @test contains(rendered, "pi = 4 * atan(1)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 function test_param_inline_assign_becomes_default()
     # design-cent-1-style: `param pi := 3.14;` and b-pn2-style
     # `param v1{Y} := 1;` initialize the parameter inline; treat the

@@ -254,8 +254,18 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
     while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
         t = peek(lex)
         if t.kind == TOKEN_IDENTIFIER && t.value == "default"
+            # The default may be an expression rather than a literal
+            # (cont5_1's `param m default n;`, ex6_160's
+            # `param pi default 4*atan(1);`) — treat it exactly like
+            # `:=` below.
             read_token!(lex)
-            default = parse(Float64, _read_expression!(lex, (TOKEN_SEMICOLON,)))
+            rhs = strip(_read_expression!(lex, (TOKEN_SEMICOLON, TOKEN_COMMA)))
+            parsed = tryparse(Float64, rhs)
+            if parsed !== nothing
+                default = parsed
+            else
+                default_expr = clean_expression(String(rhs))
+            end
         elseif t.kind == TOKEN_ASSIGN
             # `param NAME := VALUE;` — inline assignment. Numeric
             # literal becomes the `default` (design-cent-1's
