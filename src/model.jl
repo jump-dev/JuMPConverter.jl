@@ -51,20 +51,25 @@ end
 # pieces so the emitter can apply it via `JuMP.fix(model[:VAR][idx…],
 # VALUE; force = true)` without ever needing to `eval` a string.
 #
-# `indices` entries are either a `String` (from AMPL `'foo'`) or a
-# `Symbol` referring to `iter.var` — that's the index shape real
-# `.dat`s exercise (bar-truss-3). `iter.set` is the set name to
-# iterate over (resolved from the local `build_model` scope at the
-# call site).
+# `indices` entries are either a `String` (from AMPL `'foo'`), an
+# `Int` (clnlbeam's `fix x[0]`), or a `Symbol` referring to `iter.var`
+# — that's the index shape real `.dat`s exercise (bar-truss-3).
+# `iter.set` is the set name to iterate over (resolved from the local
+# `build_model` scope at the call site).
 Base.@kwdef struct FixIter
     var::Symbol
     set::Symbol
 end
 
+# `value` is a `Float64` for a literal RHS; a non-literal RHS
+# (optmass's `fix v[1,0] := speed;` where `speed` is a param) is kept
+# as its Julia expression source in a `String` and emitted verbatim
+# into the `JuMP.fix` call, where it resolves against `build_model`'s
+# kwargs.
 Base.@kwdef struct FixStatement
     variable::Symbol
     indices::Vector{Any} = Any[]
-    value::Float64
+    value::Union{Float64,String}
     iter::Union{Nothing,FixIter} = nothing
 end
 

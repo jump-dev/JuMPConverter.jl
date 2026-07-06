@@ -180,6 +180,11 @@ end
 _format_index(i::Symbol) = string(i)
 _format_index(i) = repr(i)
 
+# A `Float64` fix value emits as a literal; a `String` value is already
+# Julia expression source (`speed`) and emits verbatim.
+_format_fix_value(v::Float64) = repr(v)
+_format_fix_value(v::AbstractString) = String(v)
+
 _format_indices(idxs) = join((_format_index(i) for i in idxs), ", ")
 
 function Base.show(io::IO, model::JuMPConverter.Model)
@@ -230,7 +235,7 @@ function Base.show(io::IO, model::JuMPConverter.Model)
     end
     println(io, "    ", model.objective)
     for fx in model.fixes
-        _print_fix(io, fx, "    ", repr(fx.value))
+        _print_fix(io, fx, "    ", _format_fix_value(fx.value))
     end
     for fx in model.parametric_fixes
         kw = JuMPConverter.AMPL.fix_kwarg_name(fx)

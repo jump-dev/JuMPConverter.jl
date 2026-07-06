@@ -1401,6 +1401,49 @@ function test_model_level_fix_indexed_with_iter_and_string()
     return
 end
 
+function test_model_level_fix_numeric_index()
+    # clnlbeam-style: `fix x[0] := 0.0;` — numeric indices must parse
+    # and emit as integer literals.
+    mod = """
+    param ni integer;
+    var x {0..ni};
+    minimize obj: x[0];
+    fix x[0] := 0.0;
+    fix x[ni] := 0.0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test length(model.fixes) == 2
+    @test model.fixes[1].indices == Any[0]
+    @test model.fixes[1].value == 0.0
+    # `ni` is a param reference, resolved from `build_model`'s kwargs.
+    @test model.fixes[2].indices == Any[:ni]
+    rendered = sprint(print, model)
+    @test contains(rendered, "JuMP.fix(model[:x][0], 0.0; force = true)")
+    @test contains(rendered, "JuMP.fix(model[:x][ni], 0.0; force = true)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_model_level_fix_expression_value()
+    # optmass-style: `fix v[1,0] := speed;` — the fix value is a param
+    # reference, not a literal; it must emit verbatim so it resolves
+    # against `build_model`'s kwargs.
+    mod = """
+    param speed;
+    var v {1..2, 0..3};
+    minimize obj: v[1, 0];
+    fix v[1,0] := speed;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test length(model.fixes) == 1
+    @test model.fixes[1].indices == Any[1, 0]
+    @test model.fixes[1].value == "speed"
+    rendered = sprint(print, model)
+    @test contains(rendered, "JuMP.fix(model[:v][1, 0], speed; force = true)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()

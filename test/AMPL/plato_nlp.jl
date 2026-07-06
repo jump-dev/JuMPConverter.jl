@@ -20,22 +20,16 @@ const PLATO_NLP_MISSING = Set(["nql180.mod", "qssp60.mod", "qssp180.mod"])
 # Instances whose `read_model` currently fails. These fall into a few
 # categories:
 #
-#   1. `fix` with numeric indices (`fix x[0] := 0.0;`) — the fix parser
-#      only accepts identifier / string indices (`clnlbeam`, `corkscrw`,
-#      `optmass`).
-#   2. Set literals with numeric elements in indexing (`dtoc1nd`, `dtoc2`).
-#   3. Un-parenthesized `if … then … else …` inside constraint expressions
+#   1. Set literals with numeric elements in indexing (`dtoc1nd`, `dtoc2`).
+#   2. Un-parenthesized `if … then … else …` inside constraint expressions
 #      plus `param p integer in (0,1];` interval checks (`qcqp*`).
 #
 # Same convention as `dat/macmpec.jl`: a regression on a currently-passing
 # instance errors loudly, and a fix flips the corresponding `@test_broken`
 # into an "unexpected pass" so we know to delete it from this list.
 const PLATO_NLP_BROKEN_PARSE = Set([
-    "clnlbeam",
-    "corkscrw",
     "dtoc1nd",
     "dtoc2",
-    "optmass",
     "qcqp1000-1c",
     "qcqp1000-1nc",
     "qcqp1000-2c",

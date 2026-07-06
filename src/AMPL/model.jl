@@ -515,10 +515,11 @@ end
 # `FixStatement`. Covers both `parse_model` (model-section fix in the
 # .mod) and `parse_dat` (fix in a data section / .dat file).
 #
-# Supported syntax matches what real `.dat`s exercise (taxmcp's scalar
-# `fix PL := 1;` and bar-truss-3's `fix{i in m} H[i,'y1','y2'] := 0;`).
-# Forms not yet seen — range iter `{i in 1..n}`, numeric/negative
-# indices, negative values — would error and can be added when a real
+# Supported syntax matches what real `.mod`/`.dat`s exercise: taxmcp's
+# scalar `fix PL := 1;`, bar-truss-3's `fix{i in m} H[i,'y1','y2'] := 0;`,
+# clnlbeam's numeric indices `fix x[0] := 0.0;`, and optmass's
+# expression value `fix v[1,0] := speed;`. Forms not yet seen — range
+# iter `{i in 1..n}` — would error and can be added when a real
 # `.mod`/`.dat` needs them.
 function _parse_fix!(lex::Lexer)
     iter = nothing
@@ -539,7 +540,13 @@ function _parse_fix!(lex::Lexer)
         read_token!(lex)  # consume `]`
     end
     expect!(lex, TOKEN_ASSIGN)
-    value = parse(Float64, expect!(lex, TOKEN_NUMBER).value)
+    # A literal RHS becomes a `Float64` (this also covers `-1.0`, which
+    # lexes as two tokens but round-trips through `tryparse`); anything
+    # else (optmass's `fix v[1,0] := speed;`) is kept as a Julia
+    # expression string.
+    rhs = strip(_read_expression!(lex, (TOKEN_SEMICOLON,)))
+    parsed = tryparse(Float64, rhs)
+    value = parsed === nothing ? clean_expression(String(rhs)) : parsed
     return JuMPConverter.FixStatement(; variable, indices, value, iter)
 end
 
@@ -552,14 +559,17 @@ function _parse_fix_iter!(lex::Lexer)
     return JuMPConverter.FixIter(; var, set)
 end
 
-# Each fix index is either an iter-bound symbol (`i`) or an AMPL
-# string literal (`'y1'`).
+# Each fix index is either an iter-bound symbol (`i`), an AMPL
+# string literal (`'y1'`), or a number (clnlbeam's `fix x[0]`).
 function _parse_fix_index!(lex::Lexer)
     t = read_token!(lex)
     if t.kind == TOKEN_STRING
         return t.value
     elseif t.kind == TOKEN_IDENTIFIER
         return Symbol(t.value)
+    elseif t.kind == TOKEN_NUMBER
+        int = tryparse(Int, t.value)
+        return int === nothing ? parse(Float64, t.value) : int
     end
     return error("unexpected token in fix index: $(t.kind) `$(t.value)`")
 end
