@@ -23,10 +23,8 @@ const PLATO_NLP_MISSING = Set(["nql180.mod", "qssp60.mod", "qssp180.mod"])
 #   1. `fix` with numeric indices (`fix x[0] := 0.0;`) — the fix parser
 #      only accepts identifier / string indices (`clnlbeam`, `corkscrw`,
 #      `optmass`).
-#   2. `param n := 20; param m := 4*n;` where a `:=` expression is fed to
-#      `parse(Float64, …)` (`cont5_*`, `twod`, `ex4_2_*`, `ex6_*`).
-#   3. Set literals with numeric elements in indexing (`dtoc1nd`, `dtoc2`).
-#   4. Un-parenthesized `if … then … else …` inside constraint expressions
+#   2. Set literals with numeric elements in indexing (`dtoc1nd`, `dtoc2`).
+#   3. Un-parenthesized `if … then … else …` inside constraint expressions
 #      plus `param p integer in (0,1];` interval checks (`qcqp*`).
 #
 # Same convention as `dat/macmpec.jl`: a regression on a currently-passing
@@ -34,23 +32,9 @@ const PLATO_NLP_MISSING = Set(["nql180.mod", "qssp60.mod", "qssp180.mod"])
 # into an "unexpected pass" so we know to delete it from this list.
 const PLATO_NLP_BROKEN_PARSE = Set([
     "clnlbeam",
-    "cont5_1",
-    "cont5_1_l",
-    "cont5_2_1",
-    "cont5_2_1_l",
-    "cont5_2_2",
-    "cont5_2_2_l",
-    "cont5_2_3",
-    "cont5_2_3_l",
-    "cont5_2_4",
-    "cont5_2_4_l",
     "corkscrw",
     "dtoc1nd",
     "dtoc2",
-    "ex4_2_160",
-    "ex4_2_320",
-    "ex6_160",
-    "ex6_320",
     "optmass",
     "qcqp1000-1c",
     "qcqp1000-1nc",
@@ -68,7 +52,6 @@ const PLATO_NLP_BROKEN_PARSE = Set([
     "qcqp750-1nc",
     "qcqp750-2c",
     "qcqp750-2nc",
-    "twod",
 ])
 
 function plato_nlp_mod_files()
