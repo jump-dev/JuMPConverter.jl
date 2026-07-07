@@ -1616,7 +1616,10 @@ function test_conditional_with_sums_in_branches()
     """
     model = JuMPConverter.AMPL.parse_model(mod)
     expr = model.constraints[1].expression
-    @test contains(expr, "(j == 1 ? sum(a1[u] for u in 1:Nu) : sum(a2[u] for u in 1:Nu))")
+    @test contains(
+        expr,
+        "(j == 1 ? sum(a1[u] for u in 1:Nu) : sum(a2[u] for u in 1:Nu))",
+    )
     @test Meta.parseall("(" * expr * ")") isa Expr
     return
 end
@@ -1635,9 +1638,8 @@ end
 function test_generator_filter_if_left_untouched()
     # A Julia generator filter emitted by the sum conversion has no
     # `then` and must not be mistaken for an AMPL conditional.
-    expr = JuMPConverter.AMPL.clean_expression(
-        "sum(x[t] for t in T if a[t] > 0)",
-    )
+    expr =
+        JuMPConverter.AMPL.clean_expression("sum(x[t] for t in T if a[t] > 0)")
     @test expr == "sum(x[t] for t in T if a[t] > 0)"
     return
 end

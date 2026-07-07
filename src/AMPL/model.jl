@@ -107,8 +107,8 @@ function _read_expression!(
         # generator syntax; `max`/`min` over an index set are Julia's
         # `maximum`/`minimum` (qcqp's `max{k in 1..n} abs(A0[i,k])`).
         reducer =
-            t.kind == TOKEN_IDENTIFIER ?
-            get(_REDUCERS, t.value, nothing) : nothing
+            t.kind == TOKEN_IDENTIFIER ? get(_REDUCERS, t.value, nothing) :
+            nothing
         if reducer !== nothing && peek(lex, 2).kind == TOKEN_LBRACE
             read_token!(lex)  # consume the reducer keyword
             if !isempty(parts) && _needs_space(prev_kind, t.kind)
@@ -821,10 +821,7 @@ function clean_expression(expr::AbstractString)
     # AMPL stepped range `A .. B by S` → Julia `A:S:B` (svanberg's
     # `sum{i in 1..n-1 by 2}`). Must run before the plain `..` → `:`
     # rewrite below.
-    expr = replace(
-        expr,
-        r"\.\.\s*(.+?)\s+by\s+([^\s,)\]}]+)" => s":\2:\1",
-    )
+    expr = replace(expr, r"\.\.\s*(.+?)\s+by\s+([^\s,)\]}]+)" => s":\2:\1")
     # AMPL ranges use `..`; Julia uses `:`.
     expr = replace(expr, ".." => ":")
     # AMPL not-equal is spelled `<>` as well as `!=`.
@@ -869,11 +866,12 @@ function _ampl_conditional_to_ternary(expr::String)
     return expr
 end
 
-_is_word_byte(b::UInt8) =
-    UInt8('a') <= b <= UInt8('z') ||
-    UInt8('A') <= b <= UInt8('Z') ||
-    UInt8('0') <= b <= UInt8('9') ||
-    b == UInt8('_')
+function _is_word_byte(b::UInt8)
+    return UInt8('a') <= b <= UInt8('z') ||
+           UInt8('A') <= b <= UInt8('Z') ||
+           UInt8('0') <= b <= UInt8('9') ||
+           b == UInt8('_')
+end
 
 # `word` starts at byte `i` of `expr` with word boundaries on each side.
 function _keyword_at(expr::String, i::Int, word::String)
@@ -945,7 +943,17 @@ function _try_convert_conditional(expr::String, ifpos::Int)
         return nothing
     head = ifpos == 1 ? "" : expr[1:prevind(expr, ifpos)]
     tail = stop > nb ? "" : expr[stop:end]
-    return string(head, "(", cond, " ? ", then_branch, " : ", else_branch, ")", tail)
+    return string(
+        head,
+        "(",
+        cond,
+        " ? ",
+        then_branch,
+        " : ",
+        else_branch,
+        ")",
+        tail,
+    )
 end
 
 # AMPL writes complementarity as `LB <= LHS \u27c2 RHS >= UB` with explicit
