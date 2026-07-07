@@ -91,7 +91,8 @@ function _format_axes(axes::Axes)
     end
     body = join(parts, ", ")
     if !isnothing(axes.condition)
-        body *= "; " * _ampl_range_to_julia(axes.condition)
+        cond = _ampl_range_to_julia(axes.condition)
+        body *= "; " * JuMPConverter.AMPL._boolify_condition(cond)
     end
     return "[$body]"
 end

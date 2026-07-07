@@ -252,6 +252,19 @@ function _strip_outer_parens(s::AbstractString)
     return strip(s[(nextind(s, 1)):prevind(s, lastindex(s))])
 end
 
+# An index-set filter condition as a Julia `Bool`. AMPL treats a bare
+# arithmetic condition as true when nonzero (dirichlet's
+# `{n in N : BNDRY[n]}` with `BNDRY` a 0/1 param), but JuMP's generator
+# filter needs an actual `Bool`, so wrap a condition that carries no
+# relational/logical/membership operator in `!= 0`. `x != 0` also works
+# when `x` is already a `Bool`, so this is safe to apply unconditionally.
+function _boolify_condition(cond::AbstractString)
+    c = strip(cond)
+    isempty(c) && return String(c)
+    occursin(r"[<>]|==|!=|&&|\|\||\bin\b", c) && return String(c)
+    return "($c) != 0"
+end
+
 # A single axis' set expression as Julia source: brace literals become
 # vectors (ex4_160's `sum{k in {-1,1}}` — Julia's `{}` vector syntax is
 # discontinued), `A..B [by S]` ranges become `A:B` / `A:S:B`, and range
@@ -283,7 +296,7 @@ function _ampl_index_to_julia(idx::AbstractString)
         push!(parts, a.name == a.set ? set : "$(a.name) in $set")
     end
     body = join(parts, ", ")
-    return isempty(cond) ? body : string(body, " if ", cond)
+    return isempty(cond) ? body : string(body, " if ", _boolify_condition(cond))
 end
 
 """
@@ -534,7 +547,9 @@ function _set_default_to_julia(raw::String)
                 ("$(a.name) in $(_axis_set_to_julia(a.set))" for a in axes),
                 ", ",
             )
-            filter = isempty(cond) ? "" : " if " * clean_expression(cond)
+            filter =
+                isempty(cond) ? "" :
+                " if " * _boolify_condition(clean_expression(cond))
             return "[$element for $iters$filter]"
         end
         # No iterators: a single range `{1..NODES}` is that range;
@@ -786,23 +801,33 @@ function parse_model(mod::AbstractString)
             # `let d_theta := 2*pi/(5*(n+1));`) assigns a value whose
             # expression may reference model params, so `parse_dat`
             # can't evaluate it — record it as the param's default
-            # instead so it lands in the kwargs. Indexed lets
-            # (`let ind[0] := 1;`) don't match the regex and stay
-            # unsupported.
+            # instead so it lands in the kwargs.
             for m in eachmatch(r"\blet\s+([A-Za-z_]\w*)\s*:=\s*([^;]+);", text)
-                name, rhs = String(m.captures[1]), strip(m.captures[2])
-                haskey(model.parameters, name) || continue
-                name in model.inline_data_names && continue
-                parsed = tryparse(Float64, rhs)
-                old = model.parameters[name]
-                model.parameters[name] = JuMPConverter.Parameter(;
-                    name = old.name,
-                    axes = old.axes,
-                    integer = old.integer,
-                    default = parsed,
-                    default_expr = parsed === nothing ?
-                                   clean_expression(String(rhs)) : nothing,
+                _apply_let_default!(
+                    model,
+                    String(m.captures[1]),
+                    strip(m.captures[2]),
                 )
+            end
+            # Indexed `let {iter in SET} NAME[iter] := RHS;` over a
+            # simple set. A constant RHS (dirichlet's
+            # `let {n in N} b[n] := 1;`) is the same value at every
+            # element — a scalar default the emitter fills over the
+            # param's axes. An index-referencing RHS (henon's
+            # `let {n in N} c[n] := sqrt(COORDS[n,1]^2 + COORDS[n,2]^2);`)
+            # becomes a comprehension default over `iter in SET`. An
+            # RHS that references a *variable* (`let {n in N} u[n] :=
+            # x[n];`) is a post-solve initialiser, not data — but we
+            # can't tell those apart here, so we capture any param whose
+            # kwarg would otherwise be required and let a genuine
+            # initialiser simply be an unused default.
+            for m in eachmatch(
+                r"\blet\s*\{\s*(\w+)\s+in\s+(\w+)\s*\}\s*([A-Za-z_]\w*)\s*\[[^\]]*\]\s*:=\s*([^;]+);",
+                text,
+            )
+                iter, set = String(m.captures[1]), String(m.captures[2])
+                name, rhs = String(m.captures[3]), strip(m.captures[4])
+                _apply_indexed_let_default!(model, name, iter, set, rhs)
             end
             return model
         elseif _is_keyword(kw)
@@ -822,6 +847,70 @@ function parse_model(mod::AbstractString)
         end
     end
     return model
+end
+
+# Record a data-section `let` assignment as parameter `name`'s default
+# (a numeric literal → `default`, any other expression → `default_expr`)
+# so it becomes a `build_model` kwarg default rather than a required
+# argument. No-ops for an unknown param or one already supplied by an
+# inline `data;` table.
+function _apply_let_default!(
+    model::JuMPConverter.Model,
+    name::AbstractString,
+    rhs::AbstractString,
+)
+    haskey(model.parameters, name) || return
+    name in model.inline_data_names && return
+    parsed = tryparse(Float64, rhs)
+    old = model.parameters[name]
+    model.parameters[name] = JuMPConverter.Parameter(;
+        name = old.name,
+        axes = old.axes,
+        integer = old.integer,
+        default = parsed,
+        default_expr = parsed === nothing ? clean_expression(String(rhs)) :
+                       nothing,
+    )
+    return
+end
+
+# Record an indexed data-section `let {iter in set} NAME[iter] := rhs;`
+# as parameter `name`'s default. A numeric constant fills the param's
+# existing axes; an index-referencing expression becomes a
+# comprehension over `iter in set`, so the param's axes are rebound to
+# that single iterator (the `.mod` declared them anonymously, e.g.
+# `param c{N}`, but the comprehension needs the name `iter` to index by).
+function _apply_indexed_let_default!(
+    model::JuMPConverter.Model,
+    name::AbstractString,
+    iter::AbstractString,
+    set::AbstractString,
+    rhs::AbstractString,
+)
+    haskey(model.parameters, name) || return
+    name in model.inline_data_names && return
+    old = model.parameters[name]
+    parsed = tryparse(Float64, rhs)
+    if parsed !== nothing
+        model.parameters[name] = JuMPConverter.Parameter(;
+            name = old.name,
+            axes = old.axes,
+            integer = old.integer,
+            default = parsed,
+        )
+        return
+    end
+    axes = JuMPConverter.Axes(
+        [JuMPConverter.Axe(String(iter), String(set))],
+        nothing,
+    )
+    model.parameters[name] = JuMPConverter.Parameter(;
+        name = old.name,
+        axes = axes,
+        integer = old.integer,
+        default_expr = clean_expression(String(rhs)),
+    )
+    return
 end
 
 """

@@ -1692,6 +1692,91 @@ function test_set_default_single_iterator_comprehension()
     return
 end
 
+function test_boolify_condition()
+    # AMPL treats a bare arithmetic filter as true when nonzero
+    # (dirichlet's `{n in N : BNDRY[n]}` with `BNDRY` a 0/1 param); a
+    # condition already carrying a relational/logical/membership operator
+    # is left alone.
+    b = JuMPConverter.AMPL._boolify_condition
+    @test b("BNDRY[n]") == "(BNDRY[n]) != 0"
+    @test b("a[i] > 0") == "a[i] > 0"
+    @test b("i == j") == "i == j"
+    @test b("i <= n && j >= 1") == "i <= n && j >= 1"
+    @test b("(i, j) in ARCS") == "(i, j) in ARCS"
+    @test b("") == ""
+    return
+end
+
+function test_constraint_filter_on_param_boolified()
+    # A constraint indexed with a bare-param filter must render the JuMP
+    # `[…; cond]` filter as a `Bool` so `@constraint` accepts it.
+    mod = """
+    set N;
+    param BNDRY {N} default 0;
+    var x {N};
+    minimize obj: sum {n in N} x[n];
+    s.t. c {n in N : BNDRY[n]}: x[n] == 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "@constraint(model, c[n in N; (BNDRY[n]) != 0],")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_data_indexed_let_constant_default()
+    # dirichlet-style `let {n in N} b[n] := 1;` in the data section sets a
+    # constant at every node — captured as a scalar param default the
+    # emitter fills over the axes.
+    mod = """
+    set N;
+    param b {N} >= 0;
+    var x {N};
+    minimize obj: sum {n in N} b[n] * x[n];
+    s.t. c {n in N}: x[n] >= 0;
+    data;
+    let {n in N} b[n] := 1;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["b"].default == 1.0
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "b = JuMP.Containers.DenseAxisArray(fill(1, length(N)), N)",
+    )
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_data_indexed_let_expression_becomes_comprehension()
+    # henon-style `let {n in N} c[n] := sqrt(COORDS[n,1]^2+COORDS[n,2]^2);`
+    # references the index, so it becomes a comprehension default over
+    # `n in N`, with the anonymous `{N}` axis rebound to `n`.
+    mod = """
+    set N;
+    param COORDS {N, 1..2};
+    param c {N} >= 0;
+    var x {N};
+    minimize obj: sum {n in N} c[n] * x[n];
+    s.t. cc {n in N}: x[n] >= 0;
+    data;
+    let {n in N} c[n] := sqrt(COORDS[n,1]^2 + COORDS[n,2]^2);
+    """
+    # The RHS is captured from the raw `data;` text, so it keeps the
+    # source spacing (`COORDS[n,1]^2`) rather than lexer spacing — still
+    # valid Julia.
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["c"].default_expr ==
+          "sqrt(COORDS[n,1]^2 + COORDS[n,2]^2)"
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "c = JuMP.Containers.DenseAxisArray([sqrt(COORDS[n,1]^2 + COORDS[n,2]^2) for n in N], N)",
+    )
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()
