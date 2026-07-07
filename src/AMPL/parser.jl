@@ -408,9 +408,11 @@ function _dat_parse_multi_column!(
     sections = Tuple{Vector{String},Vector{Any}}[]
 
     while true
-        # Read column names for this section until :=
+        # Read column names for this section until `:=` (or a bare `=`
+        # — dirichlet's `param COORDS: 1 2 =` table header)
         section_cols = String[]
         while peek(lex).kind != TOKEN_ASSIGN &&
+              peek(lex).kind != TOKEN_EQ &&
               peek(lex).kind != TOKEN_SEMICOLON &&
               peek(lex).kind != TOKEN_EOF
             t = read_token!(lex)
@@ -420,8 +422,8 @@ function _dat_parse_multi_column!(
                 push!(section_cols, t.value)
             end
         end
-        peek(lex).kind != TOKEN_ASSIGN && break
-        read_token!(lex)  # consume :=
+        peek(lex).kind in (TOKEN_ASSIGN, TOKEN_EQ) || break
+        read_token!(lex)  # consume := / =
         isempty(section_cols) && continue
 
         # Collect flat values for this section until : or ;

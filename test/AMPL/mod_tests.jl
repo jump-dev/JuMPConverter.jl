@@ -1596,9 +1596,24 @@ function test_conditional_chain_without_final_else()
     expr = JuMPConverter.AMPL.clean_expression(
         "if i <= pl && u < plf then Uniform(0, 10) else if i > pl && u < pqf then Uniform(0, 10)",
     )
-    @test expr ==
-          "(i <= pl && u < plf ? Uniform(0, 10) : (i > pl && u < pqf ? Uniform(0, 10) : 0))"
+    # `Uniform(a, b)` is an AMPL RNG builtin inlined as Julia `rand`.
+    U = "(0 + (10 - 0) * rand())"
+    @test expr == "(i <= pl && u < plf ? $U : (i > pl && u < pqf ? $U : 0))"
     @test Meta.parseall(expr) isa Expr
+    return
+end
+
+function test_random_builtins_inlined()
+    # AMPL's RNG builtins render to Base `rand`/`randn` inline, so the
+    # generated file needs no runtime helper (qcqp's `Uniform01()`,
+    # `Uniform(-10, 10)`, `Normal01()`).
+    c = JuMPConverter.AMPL.clean_expression
+    @test c("Uniform01()") == "rand()"
+    @test c("Normal01()") == "randn()"
+    @test c("Uniform(-10, 10)") == "(-10 + (10 - -10) * rand())"
+    @test c("Normal(mu, sd)") == "(mu + sd * randn())"
+    @test Meta.parseall(c("Uniform(-10, 10)")) isa Expr
+    @test Meta.parseall(c("Normal(mu, sd)")) isa Expr
     return
 end
 
