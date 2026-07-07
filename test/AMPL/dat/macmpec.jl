@@ -13,8 +13,7 @@ import JuMPConverter
 #      `tap-09/15`, `monteiro*`, `water-*`, `hs044-i`, `ralphmod`).
 #   3. Niche `.mod` constructs the converter doesn't yet emit
 #      correctly: recursive defaults (`liswet1-*`'s
-#      `param B{i in 0..K} := if i == 0 then 1 else B[i-1] * i`),
-#      multi-column `let` in `.dat` (`bem-milanc30-s`).
+#      `param B{i in 0..K} := if i == 0 then 1 else B[i-1] * i`).
 #
 # Wrapping them in `@test_broken` lets `Pkg.test()` stay green: a real
 # regression that newly breaks one of the currently-passing instances
@@ -22,7 +21,6 @@ import JuMPConverter
 # the corresponding `@test_broken` to a "@test passed unexpectedly"
 # failure so we know to delete it.
 const BROKEN_BUILD = Set([
-    "bem-milanc30-s",
     "hs044-i",
     "liswet1-050",
     "liswet1-100",
