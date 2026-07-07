@@ -906,15 +906,25 @@ function clean_expression(expr::AbstractString)
     # `_axis_set_to_julia` for a `/`-computed range endpoint.
     expr = replace(expr, r"\bfloor\s*\((?!\s*Int\b)" => "floor(Int, ")
     expr = replace(expr, r"\bceil\s*\((?!\s*Int\b)" => "ceil(Int, ")
-    # AMPL RNG builtins → the implementations in `JuMPConverter.AMPL`
-    # (qcqp's `Uniform01()`; the generated file `import JuMPConverter`s
-    # whenever it has parameters, which is the only place these appear).
-    for fn in ("Uniform01", "Uniform", "Normal01", "Normal", "Irand224")
-        expr = replace(
-            expr,
-            Regex("\\b" * fn * "\\(") => "JuMPConverter.AMPL." * fn * "(",
-        )
-    end
+    # AMPL RNG builtins → inline Julia `rand`/`randn` (both in Base, so
+    # the generated file needs no extra import) — qcqp's `Uniform01()`,
+    # `Uniform(-10, 10)`, `Normal01()`. The two-arg forms take simple
+    # numeric arguments (no nested parens/commas), so a backreference
+    # substitution suffices; `\1` is repeated in `Uniform` because its
+    # arguments are literals, so the duplication is free.
+    expr = replace(expr, r"\bUniform01\s*\(\s*\)" => "rand()")
+    expr = replace(expr, r"\bNormal01\s*\(\s*\)" => "randn()")
+    expr = replace(expr, r"\bIrand224\s*\(\s*\)" => "rand(0:(2^24 - 1))")
+    expr = replace(
+        expr,
+        r"\bUniform\s*\(\s*([^(),]+?)\s*,\s*([^(),]+?)\s*\)" =>
+            s"(\1 + (\2 - \1) * rand())",
+    )
+    expr = replace(
+        expr,
+        r"\bNormal\s*\(\s*([^(),]+?)\s*,\s*([^(),]+?)\s*\)" =>
+            s"(\1 + \2 * randn())",
+    )
     expr = _ampl_set_ops_to_julia(expr)
     expr = _ampl_conditional_to_ternary(String(expr))
     expr = _convert_complementarity(expr)
