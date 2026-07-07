@@ -1596,8 +1596,10 @@ function test_conditional_chain_without_final_else()
     expr = JuMPConverter.AMPL.clean_expression(
         "if i <= pl && u < plf then Uniform(0, 10) else if i > pl && u < pqf then Uniform(0, 10)",
     )
-    @test expr ==
-          "(i <= pl && u < plf ? Uniform(0, 10) : (i > pl && u < pqf ? Uniform(0, 10) : 0))"
+    # `Uniform` is an AMPL RNG builtin, qualified to the implementation
+    # in `JuMPConverter.AMPL`.
+    U = "JuMPConverter.AMPL.Uniform(0, 10)"
+    @test expr == "(i <= pl && u < plf ? $U : (i > pl && u < pqf ? $U : 0))"
     @test Meta.parseall(expr) isa Expr
     return
 end

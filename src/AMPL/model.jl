@@ -58,20 +58,33 @@ end
 
 function _parse_axe(s::AbstractString)
     s = strip(s)
-    # Find " in " at depth 0, handling tuple indices like "(i, j) in S"
+    # Find the ` in` keyword at depth 0, handling tuple indices like
+    # "(i, j) in S". The following char is normally a space, but the
+    # lexer glues an opening bracket right after (`k in{-1,1}`,
+    # `i in(1..n)`), so accept a delimiter there too.
     depth = 0
-    n = length(s)
-    for i in 1:n
+    n = lastindex(s)
+    i = firstindex(s)
+    while i <= n
         c = s[i]
         if c in ('(', '{', '[')
             depth += 1
         elseif c in (')', '}', ']')
             depth -= 1
-        elseif c == ' ' && depth == 0 && i + 3 <= n && s[i:(i+3)] == " in "
-            name = strip(s[1:(i-1)])
-            set = strip(s[(i+4):end])
-            return JuMPConverter.Axe(name, isempty(set) ? name : set)
+        elseif c == ' ' && depth == 0
+            j2 = nextind(s, i)
+            j3 = j2 <= n ? nextind(s, j2) : (n + 1)
+            j4 = j3 <= n ? nextind(s, j3) : (n + 1)
+            if j3 <= n &&
+               s[j2] == 'i' &&
+               s[j3] == 'n' &&
+               (j4 > n || s[j4] in (' ', '{', '(', '['))
+                name = strip(s[firstindex(s):prevind(s, i)])
+                set = j4 > n ? "" : strip(s[j4:n])
+                return JuMPConverter.Axe(name, isempty(set) ? name : set)
+            end
         end
+        i = nextind(s, i)
     end
     # No "in" found at depth 0 — bare set or range reference
     return JuMPConverter.Axe(s, s)
@@ -239,20 +252,38 @@ function _strip_outer_parens(s::AbstractString)
     return strip(s[(nextind(s, 1)):prevind(s, lastindex(s))])
 end
 
-# Translate AMPL index syntax to Julia generator syntax: a `:` that
-# separates the index from a condition becomes ` if `.
-function _ampl_index_to_julia(idx::AbstractString)
-    depth = 0
-    for (i, c) in enumerate(idx)
-        if c in ('(', '[', '{')
-            depth += 1
-        elseif c in (')', ']', '}')
-            depth -= 1
-        elseif c == ':' && depth == 0
-            return string(strip(idx[1:(i-1)]), " if ", strip(idx[(i+1):end]))
-        end
+# A single axis' set expression as Julia source: brace literals become
+# vectors (ex4_160's `sum{k in {-1,1}}` — Julia's `{}` vector syntax is
+# discontinued), `A..B [by S]` ranges become `A:B` / `A:S:B`, and range
+# endpoints computed with `/` are wrapped in `floor(Int, …)` — AMPL
+# ranges iterate integers (lukvle2's `{i in 1..n/2}`), while a Julia
+# range with a Float64 endpoint iterates Float64s that then fail as
+# array indices.
+function _axis_set_to_julia(s::AbstractString)
+    s = strip(s)
+    if startswith(s, "{") && endswith(s, "}")
+        return "[" * strip(s[2:prevind(s, lastindex(s))]) * "]"
     end
-    return String(idx)
+    m = match(r"^(.+?)\s*\.\.\s*(.+?)(?:\s+by\s+(\S+))?$", s)
+    m === nothing && return String(s)
+    lo, hi, step = m.captures
+    wrap(x) = occursin("/", x) ? "floor(Int, $x)" : String(x)
+    lo, hi = wrap(lo), wrap(hi)
+    return step === nothing ? "$lo:$hi" : "$lo:$step:$hi"
+end
+
+# Translate AMPL index syntax to Julia generator syntax: each axis'
+# set is converted via `_axis_set_to_julia` and a `:` that separates
+# the indices from a condition becomes ` if `.
+function _ampl_index_to_julia(idx::AbstractString)
+    axes_str, cond = _split_condition(idx)
+    parts = String[]
+    for a in _parse_axe.(_split_axes(axes_str))
+        set = _axis_set_to_julia(a.set)
+        push!(parts, a.name == a.set ? set : "$(a.name) in $set")
+    end
+    body = join(parts, ", ")
+    return isempty(cond) ? body : string(body, " if ", cond)
 end
 
 """
@@ -500,13 +531,20 @@ function _set_default_to_julia(raw::String)
             element =
                 length(names) == 1 ? names[1] : "(" * join(names, ", ") * ")"
             iters = join(
-                ("$(a.name) in $(replace(a.set, ".." => ":"))" for a in axes),
+                ("$(a.name) in $(_axis_set_to_julia(a.set))" for a in axes),
                 ", ",
             )
             filter = isempty(cond) ? "" : " if " * clean_expression(cond)
             return "[$element for $iters$filter]"
         end
-        return "[" * replace(String(inner), ".." => ":") * "]"
+        # No iterators: a single range `{1..NODES}` is that range;
+        # an enumeration `{3, 4}` / `{-1, 1}` is a vector literal
+        # (Julia's `{}` vector syntax is discontinued).
+        inner_s = String(inner)
+        if occursin("..", inner_s) && !occursin(",", inner_s)
+            return _axis_set_to_julia(inner_s)
+        end
+        return "[" * inner_s * "]"
     end
     cleaned = replace(s, ".." => ":")
     return _ampl_set_ops_to_julia(cleaned)
@@ -744,6 +782,28 @@ function parse_model(mod::AbstractString)
             for name in keys(parse_dat(text))
                 push!(model.inline_data_names, name)
             end
+            # Scalar `let NAME := EXPR;` in the data section (camshape's
+            # `let d_theta := 2*pi/(5*(n+1));`) assigns a value whose
+            # expression may reference model params, so `parse_dat`
+            # can't evaluate it — record it as the param's default
+            # instead so it lands in the kwargs. Indexed lets
+            # (`let ind[0] := 1;`) don't match the regex and stay
+            # unsupported.
+            for m in eachmatch(r"\blet\s+([A-Za-z_]\w*)\s*:=\s*([^;]+);", text)
+                name, rhs = String(m.captures[1]), strip(m.captures[2])
+                haskey(model.parameters, name) || continue
+                name in model.inline_data_names && continue
+                parsed = tryparse(Float64, rhs)
+                old = model.parameters[name]
+                model.parameters[name] = JuMPConverter.Parameter(;
+                    name = old.name,
+                    axes = old.axes,
+                    integer = old.integer,
+                    default = parsed,
+                    default_expr = parsed === nothing ?
+                                   clean_expression(String(rhs)) : nothing,
+                )
+            end
             return model
         elseif _is_keyword(kw)
             # Other keywords: skip until semicolon
@@ -839,6 +899,22 @@ function clean_expression(expr::AbstractString)
     expr = replace(expr, r"\bdiv\b" => "÷")
     expr = replace(expr, r"\bmod\b" => "%")
     expr = replace(expr, r"\*\s*\*" => "^")
+    # AMPL `floor`/`ceil` return integers whose results index arrays
+    # (gasoil's `min(nh, floor(tau[i]/h)+1)`); Julia's return Float64,
+    # so pin the `Int` method. The negative lookahead avoids
+    # re-wrapping a `floor(Int, …)` already emitted by
+    # `_axis_set_to_julia` for a `/`-computed range endpoint.
+    expr = replace(expr, r"\bfloor\s*\((?!\s*Int\b)" => "floor(Int, ")
+    expr = replace(expr, r"\bceil\s*\((?!\s*Int\b)" => "ceil(Int, ")
+    # AMPL RNG builtins → the implementations in `JuMPConverter.AMPL`
+    # (qcqp's `Uniform01()`; the generated file `import JuMPConverter`s
+    # whenever it has parameters, which is the only place these appear).
+    for fn in ("Uniform01", "Uniform", "Normal01", "Normal", "Irand224")
+        expr = replace(
+            expr,
+            Regex("\\b" * fn * "\\(") => "JuMPConverter.AMPL." * fn * "(",
+        )
+    end
     expr = _ampl_set_ops_to_julia(expr)
     expr = _ampl_conditional_to_ternary(String(expr))
     expr = _convert_complementarity(expr)
@@ -896,8 +972,13 @@ end
 
 # Scan `expr` from byte `i`, tracking bracket depth, and return
 # `(stop_byte, kind)` where `kind` is the keyword (`:then`/`:else`/
-# `:for`) or terminator (`:comma`/`:close`/`:eos`) that ended the scan.
-function _scan_branch(expr::String, i::Int)
+# `:for`) or terminator (`:comma`/`:comparison`/`:close`/`:eos`) that
+# ended the scan. `stop_at_comparison` is set when scanning a branch —
+# lukvle12's `s.t. eq{k}: if C1 then A else B = 0;` constrains the
+# whole conditional, so the `= 0` must stay outside the ternary (JuMP
+# rejects `:if` as a constraint head) — but not when scanning for the
+# `then`, since the condition itself compares (`if k % 3 == 1 then`).
+function _scan_branch(expr::String, i::Int; stop_at_comparison::Bool = false)
     nb = ncodeunits(expr)
     depth = 0
     while i <= nb
@@ -910,6 +991,14 @@ function _scan_branch(expr::String, i::Int)
         elseif depth == 0
             if b == UInt8(',')
                 return (i, :comma)
+            elseif stop_at_comparison && (
+                b in (UInt8('='), UInt8('<'), UInt8('>')) || (
+                    b == UInt8('!') &&
+                    i < nb &&
+                    codeunit(expr, i + 1) == UInt8('=')
+                )
+            )
+                return (i, :comparison)
             elseif _keyword_at(expr, i, "then")
                 return (i, :then)
             elseif _keyword_at(expr, i, "else")
@@ -930,11 +1019,11 @@ function _try_convert_conditional(expr::String, ifpos::Int)
     kind === :then || return nothing  # generator filter, not a conditional
     cond = strip(expr[cond_from:prevind(expr, then_at)])
     then_from = then_at + 4
-    stop, kind = _scan_branch(expr, then_from)
+    stop, kind = _scan_branch(expr, then_from; stop_at_comparison = true)
     then_branch = strip(expr[then_from:prevind(expr, stop)])
     if kind === :else
         else_from = stop + 4
-        stop, _ = _scan_branch(expr, else_from)
+        stop, _ = _scan_branch(expr, else_from; stop_at_comparison = true)
         else_branch = strip(expr[else_from:prevind(expr, stop)])
     else
         else_branch = "0"

@@ -78,7 +78,11 @@ _format_axes(::Nothing) = ""
 function _format_axes(axes::Axes)
     parts = String[]
     for axe in axes.axes
-        set = _ampl_range_to_julia(axe.set)
+        # Full axis-set conversion (brace literals, `by` steps,
+        # `floor(Int, …)` for `/`-computed endpoints) — svanberg
+        # constrains over `{i in 6..n-4 by 2}`, lukvle12 over
+        # `{k in 1..3*(n-1)/4}`.
+        set = JuMPConverter.AMPL._axis_set_to_julia(axe.set)
         if axe.name == axe.set
             push!(parts, set)
         else
@@ -110,14 +114,17 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
         if isnothing(p.axes)
             return "$(p.name) = $(p.default_expr)"
         end
-        # Indexed expression default: a plain 1D iter becomes a
+        # Indexed expression default: independent iters become a
         # `DenseAxisArray` comprehension; a tuple iter (`param dist
-        # {(i, j) in arcs} := …`) becomes a `SparseAxisArray` keyed
-        # by the tuple. Multi-axis forms aren't yet handled; drop
-        # the default and leave the kwarg required.
+        # {(i, j) in arcs} := …`) or an axis depending on an earlier
+        # one (qcqp's `LQ{i in 1..n, j in 1..i}`) becomes a
+        # `SparseAxisArray`.
+        if length(p.axes.axes) > 1
+            return _format_multi_axis_expr_kwarg(p)
+        end
         if length(p.axes.axes) == 1
             a = p.axes.axes[1]
-            set = _ampl_range_to_julia(a.set)
+            set = JuMPConverter.AMPL._axis_set_to_julia(a.set)
             if startswith(a.name, "(")
                 return "$(p.name) = JuMP.Containers.SparseAxisArray(Dict($(a.name) => $(p.default_expr) for $(a.name) in $set))"
             else
@@ -135,6 +142,34 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
     lengths = join(["length($a)" for a in axes_strs], ", ")
     fill_call = "fill($rendered_default, $lengths)"
     return "$(p.name) = JuMP.Containers.DenseAxisArray($fill_call, $(join(axes_strs, ", ")))"
+end
+
+# `param NAME{i in A, j in B, …} := EXPR;` — independent axes become
+# an N-d `DenseAxisArray` comprehension; when a later axis references
+# an earlier one (qcqp's triangular `LQ{i in 1..n, j in 1..i}`) the
+# shape is ragged, so emit a `SparseAxisArray` over the flattened
+# generator instead.
+function _format_multi_axis_expr_kwarg(p::Parameter)
+    axes = p.axes.axes
+    names = [a.name for a in axes]
+    sets = [JuMPConverter.AMPL._axis_set_to_julia(a.set) for a in axes]
+    dependent = any(
+        k -> any(
+            j -> occursin(Regex("\\b" * names[j] * "\\b"), axes[k].set),
+            1:(k-1),
+        ),
+        2:length(axes),
+    )
+    if dependent
+        key = "(" * join(names, ", ") * ")"
+        iters = join(
+            ("for $(names[k]) in $(sets[k])" for k in eachindex(axes)),
+            " ",
+        )
+        return "$(p.name) = JuMP.Containers.SparseAxisArray(Dict($key => $(p.default_expr) $iters))"
+    end
+    iters = join(("$(names[k]) in $(sets[k])" for k in eachindex(axes)), ", ")
+    return "$(p.name) = JuMP.Containers.DenseAxisArray([$(p.default_expr) for $iters], $(join(sets, ", ")))"
 end
 
 # A Float64 whose value happens to be integral (`param NS := 12`)
