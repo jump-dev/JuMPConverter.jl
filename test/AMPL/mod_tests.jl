@@ -1493,6 +1493,190 @@ function test_model_level_fix_range_iter()
     return
 end
 
+# ============================================================
+# Emitter conversions exercised by the Plato AMPL-NLP collection
+# ============================================================
+
+function test_infix_div_mod_power()
+    # dtoc1nd's `k div nx`, svanberg's `i mod 2`, arki0009's `x ** y`
+    # have no infix spelling in Julia.
+    expr = JuMPConverter.AMPL.clean_expression("(k div nx) + (i mod 2) ** 3")
+    @test expr == "(k ÷ nx) + (i % 2) ^ 3"
+    @test Meta.parseall(expr) isa Expr
+    return
+end
+
+function test_not_equal_spelled_with_angle_brackets()
+    expr = JuMPConverter.AMPL.clean_expression("i mod n <> 0")
+    @test expr == "i % n != 0"
+    return
+end
+
+function test_stepped_range_by()
+    # svanberg's `sum{i in 1..n-1 by 2}` — AMPL `A..B by S` is Julia's
+    # `A:S:B`.
+    mod = """
+    param n integer;
+    var x {1..n};
+    minimize obj: sum {i in 1..n-1 by 2} x[i];
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test contains(model.objective.expression, "for i in 1:2:n - 1")
+    @test Meta.parseall("(" * model.objective.expression * ")") isa Expr
+    return
+end
+
+function test_number_literal_normalization()
+    # cont_p's `.5`, lukvle9's Fortran-style `1.d-4`, and trailing-dot
+    # `2.` are not valid Julia literals.
+    mod = """
+    param a := .5;
+    param b := 1.d-4;
+    param c := 2.;
+    var x;
+    minimize obj: a * x + b * x + c * x;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["a"].default == 0.5
+    @test model.parameters["b"].default == 1.0e-4
+    @test model.parameters["c"].default == 2.0
+    return
+end
+
+function test_number_d_exponent_only_before_digit_or_sign()
+    # `2*d` must still lex `d` as an identifier, not an exponent.
+    mod = """
+    param d;
+    var x;
+    minimize obj: 2*d + x;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test contains(model.objective.expression, "2 * d")
+    return
+end
+
+function test_julia_keyword_declaration_names_escaped()
+    # dirichlet-style `s.t. end {n in N}: …` / lukvle5's `s.t. begin:` —
+    # Julia reserved words as names must render with `var"…"`.
+    mod = """
+    set N;
+    var u {N} >= 0;
+    minimize obj: sum {n in N} u[n];
+    s.t. begin: sum {n in N} u[n] >= 1;
+    s.t. end {n in N}: u[n] <= 2;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "@constraint(model, var\"begin\", ")
+    @test contains(rendered, "@constraint(model, var\"end\"[n in N], ")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_min_max_reducers_become_minimum_maximum()
+    # qcqp's `max{k in 1..n} abs(A0[i,k])`.
+    mod = """
+    param n integer;
+    param A {1..n};
+    var x;
+    minimize obj: x + max {k in 1..n} abs(A[k]) - min {k in 1..n} A[k];
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.objective.expression
+    @test contains(expr, "maximum(abs(A[k]) for k in 1:n)")
+    @test contains(expr, "minimum(A[k] for k in 1:n)")
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_conditional_chain_without_final_else()
+    # qcqp's `param z{…} := if C1 then A else if C2 then B;` — chained
+    # `else if` whose last branch has no `else` (missing → 0). The old
+    # regex conversion emitted `(C2 ? B)) : 0` here.
+    expr = JuMPConverter.AMPL.clean_expression(
+        "if i <= pl && u < plf then Uniform(0, 10) else if i > pl && u < pqf then Uniform(0, 10)",
+    )
+    @test expr ==
+          "(i <= pl && u < plf ? Uniform(0, 10) : (i > pl && u < pqf ? Uniform(0, 10) : 0))"
+    @test Meta.parseall(expr) isa Expr
+    return
+end
+
+function test_conditional_with_sums_in_branches()
+    # NARX_CFy-style: `x[i,j] = if j==1 then sum{u in 1..Nu}(…) else
+    # sum{u in 1..Nu}(…);` — the sum body must stop at `else`, and the
+    # conditional must convert with the generators intact.
+    mod = """
+    param Nu integer;
+    param a1 {1..Nu};
+    param a2 {1..Nu};
+    var x {1..2};
+    minimize obj: x[1];
+    s.t. c {j in 1..2}: x[j] = if j == 1 then sum{u in 1..Nu}(a1[u]) else sum{u in 1..Nu}(a2[u]);
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    expr = model.constraints[1].expression
+    @test contains(
+        expr,
+        "(j == 1 ? sum(a1[u] for u in 1:Nu) : sum(a2[u] for u in 1:Nu))",
+    )
+    @test Meta.parseall("(" * expr * ")") isa Expr
+    return
+end
+
+function test_conditional_else_without_space_before_paren()
+    # svanberg-style: the lexer drops the space in `else (5 - i)`,
+    # emitting `else(5 - i)`; conversion must still find the `else`.
+    expr = JuMPConverter.AMPL.clean_expression(
+        "if((i mod 2) == 1) then (i * 2 / n + 1) else(5 - i * 3 / n)",
+    )
+    @test expr == "(((i % 2) == 1) ? (i * 2 / n + 1) : (5 - i * 3 / n))"
+    @test Meta.parseall(expr) isa Expr
+    return
+end
+
+function test_generator_filter_if_left_untouched()
+    # A Julia generator filter emitted by the sum conversion has no
+    # `then` and must not be mistaken for an AMPL conditional.
+    expr =
+        JuMPConverter.AMPL.clean_expression("sum(x[t] for t in T if a[t] > 0)")
+    @test expr == "sum(x[t] for t in T if a[t] > 0)"
+    return
+end
+
+function test_set_default_with_iterators_becomes_comprehension()
+    # ex1_160-style: `set P := {i in 1..n2, j in 1..n2: COND};` — the
+    # brace form with iterators and a condition must render as a
+    # comprehension with the condition cleaned (`=` → `==`, `mod` → `%`,
+    # `<>` → `!=`), not as a mangled vector literal.
+    mod = """
+    param n integer;
+    param n2 := n^2;
+    set P := {i in 1..n2, j in 1..n2: i == j || j = i+n || i = j-1 && i mod n <> 0};
+    var x {P};
+    minimize obj: sum {(i, j) in P} x[i, j];
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["P"].default ==
+          "[(i, j) for i in 1:n2, j in 1:n2 if i == j||j == i+n||i == j-1&&i % n != 0]"
+    @test Meta.parseall(model.sets["P"].default) isa Expr
+    return
+end
+
+function test_set_default_single_iterator_comprehension()
+    # Weyl_m0-style with `not(… and …)` in the condition.
+    mod = """
+    set S;
+    set W := {i in S: not(i == 0)};
+    var x {W};
+    minimize obj: sum {i in W} x[i];
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["W"].default == "[i for i in S if !(i == 0)]"
+    @test Meta.parseall(model.sets["W"].default) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()
