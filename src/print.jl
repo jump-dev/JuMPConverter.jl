@@ -1,6 +1,20 @@
+# AMPL allows Julia reserved words as declaration names (dirichlet's
+# `s.t. end {n in N}: …`, lukvle5's `s.t. begin: …`); escape them with
+# `var"…"` so the emitted macro call parses.
+const _JULIA_KEYWORDS = Base.Set([
+    "baremodule", "begin", "break", "catch", "const", "continue", "do",
+    "else", "elseif", "end", "export", "false", "finally", "for",
+    "function", "global", "if", "import", "let", "local", "macro",
+    "module", "quote", "return", "struct", "true", "try", "using",
+    "while",
+])
+
+_julia_name(name::AbstractString) =
+    name in _JULIA_KEYWORDS ? "var\"$name\"" : String(name)
+
 function Base.show(io::IO, variable::Variable)
     print(io, "@variable(model, ")
-    name = variable.name * _format_axes(variable.axes)
+    name = _julia_name(variable.name) * _format_axes(variable.axes)
     lb =
         isnothing(variable.lower_bound) ? nothing :
         _ampl_range_to_julia(variable.lower_bound)
@@ -129,7 +143,7 @@ function Base.show(io::IO, objective::Objective)
 end
 
 function Base.show(io::IO, constraint::Constraint)
-    name = constraint.name * _format_axes(constraint.axes)
+    name = _julia_name(constraint.name) * _format_axes(constraint.axes)
     print(io, "@constraint(model, $name, $(constraint.expression))")
     return
 end

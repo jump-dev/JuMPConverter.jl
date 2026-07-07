@@ -101,15 +101,26 @@ function _read_number!(lex::Lexer)
                 # Check that next char is a digit (otherwise it's ambiguous)
                 if lex.pos + 1 <= ncodeunits(lex.input) &&
                    !isdigit(lex.input[lex.pos+1]) &&
-                   lex.input[lex.pos+1] != 'e' &&
-                   lex.input[lex.pos+1] != 'E'
+                   !_is_exponent_char(lex.input[lex.pos+1])
                     # Include trailing dot (e.g., "2." in "2./3")
                     lex.pos += 1
                     break
                 end
             end
             lex.pos += 1
-        elseif c == 'e' || c == 'E'
+        elseif _is_exponent_char(c)
+            # `d`/`D` is the Fortran exponent marker kept by CUTE-derived
+            # models (lukvle9's `1.d-4`); only treat it as one when a
+            # digit or sign follows, so `2*d` still lexes `d` as an
+            # identifier.
+            if c in ('d', 'D') && !(
+                lex.pos + 1 <= ncodeunits(lex.input) && (
+                    isdigit(lex.input[lex.pos+1]) ||
+                    lex.input[lex.pos+1] in ('+', '-')
+                )
+            )
+                break
+            end
             lex.pos += 1
             if lex.pos <= ncodeunits(lex.input) &&
                (lex.input[lex.pos] == '+' || lex.input[lex.pos] == '-')
@@ -119,7 +130,21 @@ function _read_number!(lex::Lexer)
             break
         end
     end
-    return Token(TOKEN_NUMBER, lex.input[start:(lex.pos-1)])
+    return Token(TOKEN_NUMBER, _normalize_number(lex.input[start:(lex.pos-1)]))
+end
+
+_is_exponent_char(c::Char) = c in ('e', 'E', 'd', 'D')
+
+# Rewrite AMPL/Fortran number spellings that Julia's parser rejects:
+# leading-dot floats (`.5` → `0.5`), trailing-dot floats (`2.` → `2.0`),
+# and `d`/`D` exponents (`1.d-4` → `1.0e-4`).
+function _normalize_number(s::AbstractString)
+    s = replace(s, r"[dD]" => "e")
+    if startswith(s, ".")
+        s = "0" * s
+    end
+    s = replace(s, r"\.(?=$|[eE])" => ".0")
+    return s
 end
 
 function _read_identifier!(lex::Lexer)

@@ -86,7 +86,7 @@ text. Handles balanced braces/brackets/parens within.
 function _read_expression!(
     lex::Lexer,
     stops::NTuple{N,TokenKind};
-    stop_at_complements::Bool = false,
+    stop_keywords::Tuple{Vararg{String}} = (),
 ) where {N}
     parts = String[]
     prev_kind = nothing
@@ -95,23 +95,26 @@ function _read_expression!(
         if t.kind in stops || t.kind == TOKEN_EOF
             break
         end
-        # When called from `_read_summation!`, stop at the `complements`
-        # keyword so the sum body doesn't swallow the variable side of
-        # an enclosing complementarity constraint.
-        if stop_at_complements &&
-           t.kind == TOKEN_IDENTIFIER &&
-           t.value == "complements"
+        # When called from `_read_summation!`, stop at keywords that
+        # belong to an enclosing construct: `complements` (the variable
+        # side of a complementarity constraint) and `else`/`then` (the
+        # `if` conditional the sum is a branch of, NARX_CFy-style
+        # `if j==1 then sum{u in 1..Nu}(…) else sum{u in 1..Nu}(…)`).
+        if t.kind == TOKEN_IDENTIFIER && t.value in stop_keywords
             break
         end
-        # AMPL `sum {idx} body` / `prod {idx} body` → Julia generator syntax.
-        if t.kind == TOKEN_IDENTIFIER &&
-           (t.value == "sum" || t.value == "prod") &&
-           peek(lex, 2).kind == TOKEN_LBRACE
-            read_token!(lex)  # consume sum/prod
+        # AMPL `sum {idx} body` (also `prod`/`max`/`min`) → Julia
+        # generator syntax; `max`/`min` over an index set are Julia's
+        # `maximum`/`minimum` (qcqp's `max{k in 1..n} abs(A0[i,k])`).
+        reducer =
+            t.kind == TOKEN_IDENTIFIER ?
+            get(_REDUCERS, t.value, nothing) : nothing
+        if reducer !== nothing && peek(lex, 2).kind == TOKEN_LBRACE
+            read_token!(lex)  # consume the reducer keyword
             if !isempty(parts) && _needs_space(prev_kind, t.kind)
                 push!(parts, " ")
             end
-            push!(parts, _read_summation!(lex, t.value, stops))
+            push!(parts, _read_summation!(lex, reducer, stops))
             prev_kind = TOKEN_RPAREN
             continue
         end
@@ -170,6 +173,13 @@ function _read_paren_contents!(lex::Lexer)
     return join(args, ", ")
 end
 
+const _REDUCERS = Dict(
+    "sum" => "sum",
+    "prod" => "prod",
+    "max" => "maximum",
+    "min" => "minimum",
+)
+
 const _SUM_TERMINATORS = (
     TOKEN_PLUS,
     TOKEN_MINUS,
@@ -196,7 +206,13 @@ function _read_summation!(lex::Lexer, op::String, outer_stops)
     # `*`, `/`, `^` and indexing/parens but stops at `+`, `-`, comparisons,
     # commas, or the outer expression's stop tokens.
     body_stops = (outer_stops..., _SUM_TERMINATORS...)
-    body = strip(_read_expression!(lex, body_stops; stop_at_complements = true))
+    body = strip(
+        _read_expression!(
+            lex,
+            body_stops;
+            stop_keywords = ("complements", "else", "then"),
+        ),
+    )
     # Keep the outer parens around an `(if … then … [else …])` body so
     # the ternary-conversion regex matches the if/then pair, not the
     # enclosing `sum(... for …)` parens.
@@ -448,12 +464,7 @@ function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
         if t.kind == TOKEN_ASSIGN || t.kind == TOKEN_EQ
             read_token!(lex)
             raw = strip(_read_expression!(lex, (TOKEN_SEMICOLON,)))
-            # AMPL set ranges use `..`; Julia's UnitRange uses `:`.
-            cleaned = replace(String(raw), ".." => ":")
-            # AMPL set literal `{ 3, 4 }` → Julia Vector `[3, 4]`
-            # (Julia's `{}` vector syntax is discontinued).
-            cleaned = replace(cleaned, r"\{\s*([^{}]*?)\s*\}" => s"[\1]")
-            default = _ampl_set_ops_to_julia(cleaned)
+            default = _set_default_to_julia(String(raw))
         elseif t.kind == TOKEN_IDENTIFIER && t.value == "within"
             # `set X within Y;` — X is a subset of Y. MacMPEC `.dat`s
             # usually populate it via `let X := { }; let X := X union
@@ -470,6 +481,35 @@ function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
     end
     push!(model, JuMPConverter.Set(; name, default))
     return
+end
+
+# A `set NAME := <expr>;` default as Julia source. A brace form with
+# iterators — ex1_160's `set P := {i in 1..n2, j in 1..n2: COND};` —
+# becomes a comprehension over index tuples with the condition as its
+# filter; a plain brace literal (`{ 3, 4 }`) becomes a `Vector` (Julia's
+# `{}` vector syntax is discontinued); anything else just gets ranges
+# and set operators translated.
+function _set_default_to_julia(raw::String)
+    s = strip(raw)
+    if startswith(s, "{") && endswith(s, "}")
+        inner = strip(s[2:prevind(s, lastindex(s))])
+        axes_str, cond = _split_condition(inner)
+        axes = _parse_axe.(_split_axes(axes_str))
+        if any(a -> a.name != a.set, axes)
+            names = [a.name for a in axes]
+            element =
+                length(names) == 1 ? names[1] : "(" * join(names, ", ") * ")"
+            iters = join(
+                ("$(a.name) in $(replace(a.set, ".." => ":"))" for a in axes),
+                ", ",
+            )
+            filter = isempty(cond) ? "" : " if " * clean_expression(cond)
+            return "[$element for $iters$filter]"
+        end
+        return "[" * replace(String(inner), ".." => ":") * "]"
+    end
+    cleaned = replace(s, ".." => ":")
+    return _ampl_set_ops_to_julia(cleaned)
 end
 
 # AMPL binary set operators → Julia equivalents. Only handles
@@ -778,8 +818,17 @@ function clean_expression(expr::AbstractString)
     expr = replace(expr, "complements" => "\u27c2")
     # 2./3 -> 2. / 3 otherwise Julia says it's ambiguous with broadcast
     expr = replace(expr, "./" => ". /")
+    # AMPL stepped range `A .. B by S` → Julia `A:S:B` (svanberg's
+    # `sum{i in 1..n-1 by 2}`). Must run before the plain `..` → `:`
+    # rewrite below.
+    expr = replace(
+        expr,
+        r"\.\.\s*(.+?)\s+by\s+([^\s,)\]}]+)" => s":\2:\1",
+    )
     # AMPL ranges use `..`; Julia uses `:`.
     expr = replace(expr, ".." => ":")
+    # AMPL not-equal is spelled `<>` as well as `!=`.
+    expr = replace(expr, r"<\s*>" => "!=")
     # AMPL uses bare `=` for equality constraints; JuMP requires `==`.
     # Don't touch `<=`, `>=`, `:=`, `!=`, or an existing `==`.
     expr = replace(expr, r"(?<![<>:!=])=(?!=)" => "==")
@@ -787,54 +836,116 @@ function clean_expression(expr::AbstractString)
     expr = replace(expr, r"\band\b" => "&&")
     expr = replace(expr, r"\bor\b" => "||")
     expr = replace(expr, r"\bnot\b" => "!")
+    # AMPL's infix `div`/`mod` and `**` power have no infix spelling in
+    # Julia (dtoc1nd's `k div nx`, svanberg's `i mod 2`, arki0009's
+    # `x100 ** (-0.24)`).
+    expr = replace(expr, r"\bdiv\b" => "÷")
+    expr = replace(expr, r"\bmod\b" => "%")
+    expr = replace(expr, r"\*\s*\*" => "^")
     expr = _ampl_set_ops_to_julia(expr)
-    # AMPL conditional `if COND then THEN else ELSE` → Julia ternary.
-    # Two patterns cover the MacMPEC shapes: a fully paren-bounded
-    # form with non-paren operands, and an `else (PAREN_EXPR)` form
-    # where the else operand carries its own parens (any surrounding
-    # context, e.g. a `sum(... for …)`, is left intact).
-    expr = replace(
-        expr,
-        # `[^()]|\([^()]*\)` lets each operand contain one level of
-        # balanced parens (`(i, j) in TOLL`), as in tollmpec.
-        # The lexer drops whitespace between `if` and a following `(`
-        # (tollmpec emits `if(i, j)`), so allow `\s*` there.
-        r"\(\s*if\s*((?:[^()]|\([^()]*\))+?)\s+then\s+((?:[^()]|\([^()]*\))+?)\s+else\s+((?:[^()]|\([^()]*\))+?)\s*\)" =>
-            s"(\1 ? \2 : \3)",
-    )
-    expr = replace(
-        expr,
-        r"\bif\s*(.+?)\s+then\s+(.+?)\s+else\s*(\([^()]*(?:\([^()]*\)[^()]*)*\))" =>
-            s"(\1 ? \2 : \3)",
-    )
-    # `(if X then Y)` with no `else` — AMPL treats the missing branch
-    # as 0 (water-net's `+ (if i in reservoirs then s[i])`).
-    expr = replace(
-        expr,
-        r"\(\s*if\s*((?:[^()]|\([^()]*\))+?)\s+then\s+((?:[^()]|\([^()]*\))+?)\s*\)" =>
-            s"(\1 ? \2 : 0)",
-    )
-    # Bare `if X then Y else Z` running to end of expression, no outer
-    # parens — used in b-pn2's `param v2 := if y == 1 then 1.0 else
-    # 0.0`. Iterate so nested `else if …` chains collapse.
-    while occursin(r"(?<![?])\bif\s*.+?\s+then\s.+?\s+else\s", expr)
-        new_expr = replace(
-            expr,
-            r"(?<![?])\bif\s*(.+?)\s+then\s+(.+?)\s+else\s+(.+)$" =>
-                s"(\1 ? \2 : (\3))",
-        )
-        new_expr == expr && break
-        expr = new_expr
-    end
-    # Final pass for bare `if X then Y` with no `else` — water-net's
-    # `hl := height[i] + if i in consumers then (...);`. Allow `\s*`
-    # after `then` because the lexer can drop the space before a `(`.
-    expr = replace(
-        expr,
-        r"(?<![?])\bif\s*(.+?)\s+then\s*(.+)$" => s"(\1 ? \2 : 0)",
-    )
+    expr = _ampl_conditional_to_ternary(String(expr))
     expr = _convert_complementarity(expr)
     return expr
+end
+
+"""
+    _ampl_conditional_to_ternary(expr::String) -> String
+
+AMPL conditional `if COND then A [else B]` → Julia ternary
+`(COND ? A : B)`, a missing `else` defaulting to 0.
+
+Converts the rightmost `if` first so chained `else if …` collapses
+inside-out, and scans operands with bracket-depth awareness so they may
+contain arbitrary balanced nesting — including `sum(... for …)`
+generators. An `if` with no `then` at its own depth (the filter of a
+Julia generator emitted by the sum conversion) is left untouched. A
+branch ends at `else`/`for`, a comma at the `if`'s depth, a bracket
+closing the group the `if` lives in, or the end of the expression.
+"""
+function _ampl_conditional_to_ternary(expr::String)
+    while (converted = _convert_last_conditional(expr)) !== nothing
+        expr = converted
+    end
+    return expr
+end
+
+_is_word_byte(b::UInt8) =
+    UInt8('a') <= b <= UInt8('z') ||
+    UInt8('A') <= b <= UInt8('Z') ||
+    UInt8('0') <= b <= UInt8('9') ||
+    b == UInt8('_')
+
+# `word` starts at byte `i` of `expr` with word boundaries on each side.
+function _keyword_at(expr::String, i::Int, word::String)
+    nb = ncodeunits(expr)
+    i + ncodeunits(word) - 1 <= nb || return false
+    for (k, c) in enumerate(codeunits(word))
+        codeunit(expr, i + k - 1) == c || return false
+    end
+    i > 1 && _is_word_byte(codeunit(expr, i - 1)) && return false
+    j = i + ncodeunits(word)
+    j <= nb && _is_word_byte(codeunit(expr, j)) && return false
+    return true
+end
+
+function _convert_last_conditional(expr::String)
+    for m in Iterators.reverse(collect(eachmatch(r"\bif\b", expr)))
+        r = _try_convert_conditional(expr, m.offset)
+        r === nothing || return r
+    end
+    return nothing
+end
+
+# Scan `expr` from byte `i`, tracking bracket depth, and return
+# `(stop_byte, kind)` where `kind` is the keyword (`:then`/`:else`/
+# `:for`) or terminator (`:comma`/`:close`/`:eos`) that ended the scan.
+function _scan_branch(expr::String, i::Int)
+    nb = ncodeunits(expr)
+    depth = 0
+    while i <= nb
+        b = codeunit(expr, i)
+        if b in (UInt8('('), UInt8('['), UInt8('{'))
+            depth += 1
+        elseif b in (UInt8(')'), UInt8(']'), UInt8('}'))
+            depth == 0 && return (i, :close)
+            depth -= 1
+        elseif depth == 0
+            if b == UInt8(',')
+                return (i, :comma)
+            elseif _keyword_at(expr, i, "then")
+                return (i, :then)
+            elseif _keyword_at(expr, i, "else")
+                return (i, :else)
+            elseif _keyword_at(expr, i, "for")
+                return (i, :for)
+            end
+        end
+        i += 1
+    end
+    return (nb + 1, :eos)
+end
+
+function _try_convert_conditional(expr::String, ifpos::Int)
+    nb = ncodeunits(expr)
+    cond_from = ifpos + 2
+    then_at, kind = _scan_branch(expr, cond_from)
+    kind === :then || return nothing  # generator filter, not a conditional
+    cond = strip(expr[cond_from:prevind(expr, then_at)])
+    then_from = then_at + 4
+    stop, kind = _scan_branch(expr, then_from)
+    then_branch = strip(expr[then_from:prevind(expr, stop)])
+    if kind === :else
+        else_from = stop + 4
+        stop, _ = _scan_branch(expr, else_from)
+        else_branch = strip(expr[else_from:prevind(expr, stop)])
+    else
+        else_branch = "0"
+    end
+    (isempty(cond) || isempty(then_branch) || isempty(else_branch)) &&
+        return nothing
+    head = ifpos == 1 ? "" : expr[1:prevind(expr, ifpos)]
+    tail = stop > nb ? "" : expr[stop:end]
+    return string(head, "(", cond, " ? ", then_branch, " : ", else_branch, ")", tail)
 end
 
 # AMPL writes complementarity as `LB <= LHS \u27c2 RHS >= UB` with explicit
