@@ -620,6 +620,28 @@ function test_param_default_expression_becomes_default_expr()
     return
 end
 
+function test_param_interval_check_skipped()
+    # qcqp-style: `param ml integer in [0,n);` and `param sq in (0,1];`
+    # — interval membership checks whose half-open delimiters are
+    # deliberately unbalanced (`[…)`, `(…]`). Like `> 0` checks they
+    # are skipped, and a qualifier after the interval must survive.
+    mod = """
+    param n integer > 0;
+    param ml integer in [0,n);
+    param sq in (0,1];
+    param pf in (0,1] default .2;
+    var x {1..n};
+    minimize obj: sum {i in 1..n} x[i];
+    subject to
+    c {i in 1..ml}: x[i] >= sq;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.parameters["ml"].integer
+    @test haskey(model.parameters, "sq")
+    @test model.parameters["pf"].default == 0.2
+    return
+end
+
 function test_param_inline_assign_becomes_default()
     # design-cent-1-style: `param pi := 3.14;` and b-pn2-style
     # `param v1{Y} := 1;` initialize the parameter inline; treat the
@@ -1440,6 +1462,33 @@ function test_model_level_fix_expression_value()
     @test model.fixes[1].value == "speed"
     rendered = sprint(print, model)
     @test contains(rendered, "JuMP.fix(model[:v][1, 0], speed; force = true)")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_model_level_fix_range_iter()
+    # dtoc2-style: `fix{i in 1..ny} y[1,i] := i/(2*ny);` — the iter set
+    # is an inline range (not a set name) and the fix value is an
+    # expression referencing the iter variable.
+    mod = """
+    param ny integer;
+    var y {1..3, 1..ny};
+    minimize obj: y[1, 1];
+    fix{i in 1..ny} y[1,i] := i/(2*ny);
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test length(model.fixes) == 1
+    fx = model.fixes[1]
+    @test fx.iter.var === :i
+    @test fx.iter.set == "1:ny"
+    @test fx.indices == Any[1, :i]
+    @test fx.value == "i / (2 * ny)"
+    rendered = sprint(print, model)
+    @test contains(rendered, "for i in 1:ny")
+    @test contains(
+        rendered,
+        "JuMP.fix(model[:y][1, i], i / (2 * ny); force = true)",
+    )
     @test Meta.parseall(rendered) isa Expr
     return
 end
