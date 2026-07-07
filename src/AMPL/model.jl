@@ -318,9 +318,23 @@ function _parse_param!(lex::Lexer, model::JuMPConverter.Model)
             read_token!(lex)
             _read_expression!(lex, (TOKEN_SEMICOLON,))
         elseif t.kind == TOKEN_IDENTIFIER && t.value == "in"
-            # `param name symbolic in SET;` — skip
+            # `param name symbolic in SET;` or an interval check like
+            # qcqp's `param ml integer in [0,n);` / `param sq in (0,1];`.
+            # Half-open intervals mix `[`/`(` with `)`/`]`, so a
+            # balanced expression read would run past the statement —
+            # skip raw tokens up to the next qualifier keyword, `:=`,
+            # or `;` instead. (Not `,`: intervals contain one.)
             read_token!(lex)
-            _read_expression!(lex, (TOKEN_SEMICOLON,))
+            while true
+                nx = peek(lex)
+                if nx.kind in (TOKEN_SEMICOLON, TOKEN_EOF, TOKEN_ASSIGN)
+                    break
+                elseif nx.kind == TOKEN_IDENTIFIER &&
+                       nx.value in ("default", "integer", "binary", "symbolic")
+                    break
+                end
+                read_token!(lex)
+            end
         elseif t.kind == TOKEN_COMMA
             read_token!(lex)
         else
@@ -517,10 +531,9 @@ end
 #
 # Supported syntax matches what real `.mod`/`.dat`s exercise: taxmcp's
 # scalar `fix PL := 1;`, bar-truss-3's `fix{i in m} H[i,'y1','y2'] := 0;`,
-# clnlbeam's numeric indices `fix x[0] := 0.0;`, and optmass's
-# expression value `fix v[1,0] := speed;`. Forms not yet seen — range
-# iter `{i in 1..n}` — would error and can be added when a real
-# `.mod`/`.dat` needs them.
+# clnlbeam's numeric indices `fix x[0] := 0.0;`, optmass's expression
+# value `fix v[1,0] := speed;`, and dtoc1nd's range iter
+# `fix {i in 1..ny} y[1,i] := 0.0;`.
 function _parse_fix!(lex::Lexer)
     iter = nothing
     if peek(lex).kind == TOKEN_LBRACE
@@ -554,8 +567,15 @@ function _parse_fix_iter!(lex::Lexer)
     var = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
     in_tok = expect!(lex, TOKEN_IDENTIFIER)
     @assert in_tok.value == "in"
-    set = Symbol(expect!(lex, TOKEN_IDENTIFIER).value)
+    # The set is either a bare name (bar-truss-3's `{i in m}`) or an
+    # inline expression (dtoc1nd's `{i in 1..ny}` → `1:ny`).
+    rhs = strip(_read_expression!(lex, (TOKEN_RBRACE,)))
     expect!(lex, TOKEN_RBRACE)
+    set = if occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", rhs)
+        Symbol(rhs)
+    else
+        clean_expression(String(rhs))
+    end
     return JuMPConverter.FixIter(; var, set)
 end
 

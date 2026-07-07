@@ -54,11 +54,13 @@ end
 # `indices` entries are either a `String` (from AMPL `'foo'`), an
 # `Int` (clnlbeam's `fix x[0]`), or a `Symbol` referring to `iter.var`
 # — that's the index shape real `.dat`s exercise (bar-truss-3).
-# `iter.set` is the set name to iterate over (resolved from the local
-# `build_model` scope at the call site).
+# `iter.set` is the name of the set to iterate over (a `Symbol`,
+# resolved from the local `build_model` scope at the call site) or
+# Julia expression source for an inline range (a `String`, dtoc1nd's
+# `fix {i in 1..ny}` → `1:ny`).
 Base.@kwdef struct FixIter
     var::Symbol
-    set::Symbol
+    set::Union{Symbol,String}
 end
 
 # `value` is a `Float64` for a literal RHS; a non-literal RHS
