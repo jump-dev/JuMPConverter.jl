@@ -126,16 +126,6 @@ const PLATO_NLP_SKIP_BUILD = merge(
 # `@test_broken` keeps the suite green while flagging the gap; a fix flips
 # it to an "unexpected pass".
 const PLATO_NLP_BROKEN_BUILD = merge(
-    # Finite-element meshes: the node-coefficient params (`b`, `c`, `d`,
-    # `p`) are supplied by inline `data;` tables the `.dat` reader doesn't
-    # fully capture, so they stay required kwargs of `build_model`.
-    _plato_reasons(
-        [
-            "$m$n" for m in ("dirichlet", "henon", "lane_emden") for
-            n in (40, 80, 120)
-        ],
-        "FE node data (b/c/d/p) not captured from inline `data;` table",
-    ),
     # `param rho_0;` / `param y1_n;` have no default and no data
     # assignment — genuinely unspecified, so `build_model()` is missing a
     # required kwarg.
