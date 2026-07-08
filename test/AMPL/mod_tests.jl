@@ -1777,6 +1777,30 @@ function test_data_indexed_let_expression_becomes_comprehension()
     return
 end
 
+function test_recursive_param_default_sequential_fill()
+    # liswet1-style `param B{i in 0..K} := if i==0 then 1 else B[i-1]*i;`
+    # — the default indexes the parameter being defined, so a
+    # comprehension would reference `B` before it exists. Emit a
+    # sequential `let … for … end` fill instead.
+    mod = """
+    param K integer;
+    param B {i in 0..K} := if (i = 0) then 1 else B[i-1]*i;
+    var x {0..K};
+    minimize obj: sum {i in 0..K} B[i] * x[i];
+    s.t. c {i in 0..K}: x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(
+        rendered,
+        "B = let B = JuMP.Containers.DenseAxisArray(Vector{Float64}(undef, length(0:K)), 0:K)",
+    )
+    @test contains(rendered, "B[i] = ")
+    @test !contains(rendered, "for i in 0:K], 0:K)")  # not a comprehension
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()
