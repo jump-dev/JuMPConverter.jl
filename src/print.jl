@@ -318,6 +318,20 @@ function Base.show(io::IO, model::JuMPConverter.Model)
         join(io, kwargs, ", ")
     end
     println(io, ")")
+    # AMPL parameters with a `default` return it for any index the data
+    # leaves unset; wrap each indexed one so a missing-key access falls
+    # back to the default instead of throwing (the shim is transparent
+    # for a fully-populated container). Done before the variables, whose
+    # bounds may reference such a parameter (`var z >= zl[k], <= zu[k]`).
+    for (kind, name) in model.kwarg_order
+        kind === :param || continue
+        p = model.parameters[name]
+        (isnothing(p.default) || isnothing(p.axes)) && continue
+        println(
+            io,
+            "    $name = JuMPConverter.AMPL.with_default($name, $(_render_number(p.default)))",
+        )
+    end
     println(io, "    model = Model()")
     for variable in values(model.variables)
         println(io, "    ", variable)
