@@ -266,25 +266,40 @@ function _boolify_condition(cond::AbstractString)
 end
 
 """
-    Unset{name}
+    Unset(name::Symbol)
 
-Default value for a `build_model` keyword argument (`name`) whose real
-value must come from the data. AMPL requires every set and parameter to
-be assigned, so `build_model(path)` always supplies them from the `.dat`
-and this sentinel is never left in place for anything the model uses.
+Default value for a `build_model` keyword argument whose real value must
+come from the data. AMPL requires every set and parameter to be assigned,
+so `build_model(path)` always supplies them from the `.dat` and this
+sentinel is never left in place for anything the model uses.
 
 It exists only so `build_model()` can be *called* without every argument:
 a set/parameter that a `.mod` declares but never uses (MacMPEC keeps
-leftover `InitPoints`/`rho_0` declarations) then costs nothing. A value
-that *is* used but was never supplied surfaces as, e.g.
+leftover `InitPoints`/`rho_0` declarations) then costs nothing. Indexing
+or iterating an unset value raises a clear error naming it; any other use
+fails as, e.g., `MethodError: no method matching *(::Float64, ::Unset)`.
+Either way the fix is to populate that item in your `.dat`.
 
-    MethodError: no method matching *(::Float64, ::JuMPConverter.AMPL.Unset{:rho_0})
-
-whose `{:rho_0}` names the missing item — populate it in your `.dat`.
-
-Deliberately supports no operations so any real use fails loudly.
+`name` is a *field*, not a type parameter, so every `Unset` shares one
+concrete type and `build_model` is not recompiled per parameter name.
 """
-struct Unset{name} end
+struct Unset
+    name::Symbol
+end
+
+@noinline function _unset_used(u::Unset)
+    return error(
+        "`$(u.name)` has no value: `build_model` was called without it but " *
+        "the model uses it. AMPL requires every set/parameter to be " *
+        "assigned — populate `$(u.name)` in the `.dat`.",
+    )
+end
+
+# Cover the common data-access patterns (indexing a parameter, iterating
+# a set) with a named error. Only reached when a genuinely-unset value is
+# used, so this never touches a normally-built model.
+Base.getindex(u::Unset, ::Any...) = _unset_used(u)
+Base.iterate(u::Unset, ::Any...) = _unset_used(u)
 
 # A single axis' set expression as Julia source: brace literals become
 # vectors (ex4_160's `sum{k in {-1,1}}` — Julia's `{}` vector syntax is
