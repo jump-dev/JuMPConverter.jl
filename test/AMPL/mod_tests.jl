@@ -1825,6 +1825,29 @@ function test_defaulted_param_wrapped_with_default()
     return
 end
 
+function test_bare_tuple_set_index_expanded()
+    # tollmpec-style: `var F{ARCS}` where `set ARCS within (N cross N)`
+    # is a set of 2-tuples. A bare index must be emitted as a
+    # destructuring generator so JuMP builds a 2-D `SparseAxisArray`
+    # that `F[i, j]` can index — not a 1-D container over whole tuples.
+    # An index that already destructures (`{(i, j) in ARCS}`) is left
+    # as is.
+    mod = """
+    set N := 1..3;
+    set ARCS within (N cross N);
+    var F {ARCS};
+    minimize obj: sum {(i,j) in ARCS} F[i,j];
+    s.t. c {(i,j) in ARCS}: F[i,j] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["ARCS"].dimension == 2
+    rendered = sprint(print, model)
+    @test contains(rendered, "@variable(model, F[(_i1, _i2) in ARCS])")
+    @test contains(rendered, "@constraint(model, c[(i, j) in ARCS],")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()

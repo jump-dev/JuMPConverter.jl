@@ -23,6 +23,12 @@ end
 Base.@kwdef struct Set
     name::String
     default::Union{Nothing,String} = nothing
+    # Arity of the set's elements: 1 for a plain set, ≥2 for a set of
+    # tuples (`set ARCS within (N cross N)` / `set A dimen 2`). A bare
+    # index over a tuple set must be emitted as a destructuring
+    # generator (`x[(i, j) in ARCS]`) so JuMP builds a 2-D
+    # `SparseAxisArray` that `x[i, j]` can index.
+    dimension::Int = 1
 end
 
 Base.@kwdef struct Variable

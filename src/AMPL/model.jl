@@ -524,6 +524,7 @@ function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
     name = expect!(lex, TOKEN_IDENTIFIER).value
     default = nothing
     within = false
+    dimension = 1
     while peek(lex).kind != TOKEN_SEMICOLON && peek(lex).kind != TOKEN_EOF
         t = peek(lex)
         # `:=` is initialization, `=` is a derived-set definition; both
@@ -536,8 +537,17 @@ function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
             # `set X within Y;` — X is a subset of Y. MacMPEC `.dat`s
             # usually populate it via `let X := { }; let X := X union
             # { k };` which we skip; default to empty so the kwarg is
-            # at least not required.
+            # at least not required. The superset also tells us the
+            # element arity: `within (N cross N)` → 2-tuples.
             within = true
+            read_token!(lex)
+            superset = strip(_read_expression!(lex, (TOKEN_SEMICOLON,)))
+            dimension = _infer_set_dimension(superset, model)
+        elseif t.kind == TOKEN_IDENTIFIER && t.value == "dimen"
+            # `set A dimen 2;` states the arity directly.
+            read_token!(lex)
+            n = tryparse(Int, peek(lex).value)
+            n === nothing || (dimension = n)
             read_token!(lex)
         else
             read_token!(lex)
@@ -546,8 +556,21 @@ function _parse_set!(lex::Lexer, model::JuMPConverter.Model)
     if isnothing(default) && within
         default = "Int[]"
     end
-    push!(model, JuMPConverter.Set(; name, default))
+    push!(model, JuMPConverter.Set(; name, default, dimension))
     return
+end
+
+# Element arity of a set from its `within` superset: `A cross B cross C`
+# → 3; a bare set name inherits that set's dimension; otherwise 1.
+function _infer_set_dimension(
+    superset::AbstractString,
+    model::JuMPConverter.Model,
+)
+    crosses = count("cross", superset)
+    crosses > 0 && return crosses + 1
+    id = strip(replace(superset, r"[(){}\s]" => ""))
+    haskey(model.sets, id) && return model.sets[id].dimension
+    return 1
 end
 
 # A `set NAME := <expr>;` default as Julia source. A brace form with
@@ -852,6 +875,7 @@ function parse_model(mod::AbstractString)
                 name, rhs = String(m.captures[3]), strip(m.captures[4])
                 _apply_indexed_let_default!(model, name, iter, set, rhs)
             end
+            _expand_tuple_set_indices!(model)
             return model
         elseif _is_keyword(kw)
             # Other keywords: skip until semicolon
@@ -869,7 +893,33 @@ function parse_model(mod::AbstractString)
             read_token!(lex)
         end
     end
+    _expand_tuple_set_indices!(model)
     return model
+end
+
+# Rewrite a bare index over a tuple set (`var F{ARCS}` → `F[(_i1, _i2)
+# in ARCS]`) so JuMP builds a `SparseAxisArray` keyed by the tuple,
+# which `F[i, j]` can then index. An index that already destructures
+# (`x{(i, j) in ARCS}`) or is over a plain set is left untouched.
+function _expand_tuple_set_indices!(model::JuMPConverter.Model)
+    tuple_sets = Base.Set(name for (name, s) in model.sets if s.dimension > 1)
+    isempty(tuple_sets) && return
+    function rewrite!(axes)
+        axes === nothing && return
+        for (k, a) in enumerate(axes.axes)
+            (a.name == a.set && a.set in tuple_sets) || continue
+            d = model.sets[a.set].dimension
+            names = join(("_i$j" for j in 1:d), ", ")
+            axes.axes[k] = JuMPConverter.Axe("($names)", a.set)
+        end
+    end
+    for v in values(model.variables)
+        rewrite!(v.axes)
+    end
+    for c in model.constraints
+        rewrite!(c.axes)
+    end
+    return
 end
 
 # Record a data-section `let` assignment as parameter `name`'s default
