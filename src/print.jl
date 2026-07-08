@@ -149,9 +149,9 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
                 return "$(p.name) = JuMP.Containers.DenseAxisArray([$(p.default_expr) for $(a.name) in $set], $set)"
             end
         end
-        return p.name
+        return _unset_kwarg(p.name)
     end
-    isnothing(p.default) && return p.name
+    isnothing(p.default) && return _unset_kwarg(p.name)
     rendered_default = _render_number(p.default)
     if isnothing(p.axes)
         return "$(p.name) = $rendered_default"
@@ -200,11 +200,21 @@ function _render_number(v::Float64)
     return string(v)
 end
 
+# A set or parameter with no default and no data-section value is
+# supplied by the `.dat` at build time. Rather than a bare required
+# keyword (which Julia errors on when omitted, even if the model never
+# uses it — MacMPEC's vestigial `InitPoints`/`rho_0`), default it to an
+# `Unset{:name}` sentinel: unused ⇒ harmless, used ⇒ a `MethodError`
+# whose type names the missing value. `build_model(path)` populates real
+# values, so the sentinel only ever survives for genuinely-unset data.
+_unset_kwarg(name) = "$name = JuMPConverter.AMPL.Unset{:$name}()"
+
 function _format_set_kwarg(s::Set, inline::Bool)
     if inline
         return "$(s.name) = _INLINE_DATA[\"$(s.name)\"]"
     end
-    return isnothing(s.default) ? s.name : "$(s.name) = $(s.default)"
+    return isnothing(s.default) ? _unset_kwarg(s.name) :
+           "$(s.name) = $(s.default)"
 end
 
 function Base.show(io::IO, objective::Objective)

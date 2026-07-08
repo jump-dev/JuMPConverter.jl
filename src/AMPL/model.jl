@@ -288,6 +288,27 @@ function Base.getindex(a::DefaultArray, idx...)
     end
 end
 
+"""
+    Unset{name}
+
+Default value for a `build_model` keyword argument (`name`) whose real
+value must come from the data. AMPL requires every set and parameter to
+be assigned, so `build_model(path)` always supplies them from the `.dat`
+and this sentinel is never left in place for anything the model uses.
+
+It exists only so `build_model()` can be *called* without every argument:
+a set/parameter that a `.mod` declares but never uses (MacMPEC keeps
+leftover `InitPoints`/`rho_0` declarations) then costs nothing. A value
+that *is* used but was never supplied surfaces as, e.g.
+
+    MethodError: no method matching *(::Float64, ::JuMPConverter.AMPL.Unset{:rho_0})
+
+whose `{:rho_0}` names the missing item — populate it in your `.dat`.
+
+Deliberately supports no operations so any real use fails loudly.
+"""
+struct Unset{name} end
+
 # A single axis' set expression as Julia source: brace literals become
 # vectors (ex4_160's `sum{k in {-1,1}}` — Julia's `{}` vector syntax is
 # discontinued), `A..B [by S]` ranges become `A:B` / `A:S:B`, and range
