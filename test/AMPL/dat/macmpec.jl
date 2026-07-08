@@ -11,9 +11,6 @@ import JuMPConverter
 #   2. Models that lean on AMPL's lazy / defaulted indexing semantics
 #      where JuMP requires every accessed key to exist (`siouxfls*`,
 #      `tap-09/15`, `monteiro*`, `water-*`, `hs044-i`, `ralphmod`).
-#   3. Niche `.mod` constructs the converter doesn't yet emit
-#      correctly: recursive defaults (`liswet1-*`'s
-#      `param B{i in 0..K} := if i == 0 then 1 else B[i-1] * i`).
 #
 # Wrapping them in `@test_broken` lets `Pkg.test()` stay green: a real
 # regression that newly breaks one of the currently-passing instances
@@ -22,9 +19,6 @@ import JuMPConverter
 # failure so we know to delete it.
 const BROKEN_BUILD = Set([
     "hs044-i",
-    "liswet1-050",
-    "liswet1-100",
-    "liswet1-200",
     "monteiro",
     "monteiroB",
     "nash1a",

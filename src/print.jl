@@ -126,6 +126,23 @@ function _format_param_kwarg(p::Parameter, inline::Bool)
         if length(p.axes.axes) == 1
             a = p.axes.axes[1]
             set = JuMPConverter.AMPL._axis_set_to_julia(a.set)
+            if occursin(Regex("\\b" * p.name * "\\["), p.default_expr)
+                # Recursive default (liswet1's
+                # `param B{i in 0..K} := if i==0 then 1 else B[i-1]*i`):
+                # the expression indexes the parameter being defined, so
+                # a comprehension would reference `B` before it exists.
+                # Emit a sequential fill in element order instead.
+                return string(
+                    "$(p.name) = let $(p.name) = ",
+                    "JuMP.Containers.DenseAxisArray(",
+                    "Vector{Float64}(undef, length($set)), $set)\n",
+                    "        for $(a.name) in $set\n",
+                    "            $(p.name)[$(a.name)] = $(p.default_expr)\n",
+                    "        end\n",
+                    "        $(p.name)\n",
+                    "    end",
+                )
+            end
             if startswith(a.name, "(")
                 return "$(p.name) = JuMP.Containers.SparseAxisArray(Dict($(a.name) => $(p.default_expr) for $(a.name) in $set))"
             else
