@@ -122,22 +122,12 @@ const PLATO_NLP_SKIP_BUILD = merge(
     ),
 )
 
-# Instances that build quickly but fail for a known converter/data gap.
-# `@test_broken` keeps the suite green while flagging the gap; a fix flips
-# it to an "unexpected pass".
-const PLATO_NLP_BROKEN_BUILD = merge(
-    # `param rho_0;` / `param y1_n;` have no default and no data
-    # assignment — genuinely unspecified, so `build_model()` is missing a
-    # required kwarg.
-    _plato_reasons(
-        ["robot_800", "robot_1600"],
-        "param `rho_0` has no default or data source",
-    ),
-    _plato_reasons(
-        ["steering_6400", "steering_12800"],
-        "param `y1_n` has no default or data source",
-    ),
-)
+# Instances that build (via `read_from_file`) but fail for a known
+# converter/data gap, wrapped in `@test_broken`. Empty: every
+# non-skipped instance now builds — robot/steering's declared-but-unused
+# `rho_0`/`y1_n` are handled by the `JuMPConverter.AMPL.Unset` kwarg
+# sentinel. A future gap goes here with its reason.
+const PLATO_NLP_BROKEN_BUILD = Dict{String,String}()
 
 @testset "PlatoNLP build" begin
     @testset "$mod_file" for mod_file in plato_nlp_mod_files()
