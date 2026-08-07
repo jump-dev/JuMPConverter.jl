@@ -64,11 +64,18 @@ function DatSchema(model::JuMPConverter.Model)
 end
 
 """
-    read_dat(filename::String, schema_or_model = nothing) -> Dict{Symbol, Any}
+    read_dat(filename, schema_or_model = nothing) -> Dict{Symbol, Any}
 
 Read an AMPL .dat file and return a dictionary mapping parameter names
 (as `Symbol`s, so that the result can be splatted into `build_model`'s
 keyword arguments) to their values.
+
+`filename` may also be a vector of `.dat` paths, read as AMPL's
+successive `data <file>;` statements would: see [`merge_data`](@ref) for
+how they combine. A `.mod` sometimes declares data that lives in a
+shared `.dat` rather than the problem's own one — MacMPEC's `nash1a`
+needs `nash1.dat` (which populates `InitPoints`) alongside `nash1a.dat`
+(which only sets the starting point).
 
 The second argument is either a `DatSchema` (preferred — what the
 generated `.jl` file uses), a `JuMPConverter.Model` (convenience: a
@@ -89,6 +96,39 @@ end
 
 function read_dat(filename::String, model::JuMPConverter.Model)
     return read_dat(filename, DatSchema(model))
+end
+
+function read_dat(
+    filenames::AbstractVector{<:AbstractString},
+    schema::Union{Nothing,DatSchema} = nothing,
+)
+    return merge_data(read_dat(String(f), schema) for f in filenames)
+end
+
+function read_dat(
+    filenames::AbstractVector{<:AbstractString},
+    model::JuMPConverter.Model,
+)
+    return read_dat(filenames, DatSchema(model))
+end
+
+"""
+    merge_data(datas) -> Dict{Symbol, Any}
+
+Combine the dictionaries of an iterable of `.dat`/CSV reads the way
+AMPL applies successive `data <file>;` statements: each one is layered
+onto the previous, so the last file to set a name wins, while `fix`
+statements accumulate across files instead of replacing one another.
+"""
+function merge_data(datas)
+    merged = Dict{Symbol,Any}()
+    fixes = JuMPConverter.FixStatement[]
+    for data in datas
+        append!(fixes, pop!(data, :fixes, JuMPConverter.FixStatement[]))
+        merge!(merged, data)
+    end
+    isempty(fixes) || (merged[:fixes] = fixes)
+    return merged
 end
 
 function _range(bounds::NTuple{2,Int})
@@ -800,7 +840,7 @@ function parse_dat(text::String, schema::Union{Nothing,DatSchema} = nothing)
         elseif kw == "fix"
             # Data-section `fix VAR := V;` modifies model variables, not
             # data values. Stash structured fixes under `"fixes"` so the
-            # generated `build_model(path::String)` can route them onto
+            # generated `build_model(path)` can route them onto
             # the matching `fix_<…>` kwarg.
             read_token!(lex)
             fx = _parse_fix!(lex)

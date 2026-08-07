@@ -158,18 +158,25 @@ function _write_csv_value(path::String, v::JuMP.Containers.SparseAxisArray)
 end
 
 """
-    dat_to_csv(dat_path::String, schema::DatSchema, out_dir::String)
-    dat_to_csv(dat_path::String, model::JuMPConverter.Model, out_dir::String)
+    dat_to_csv(dat_path, schema::DatSchema, out_dir::String)
+    dat_to_csv(dat_path, model::JuMPConverter.Model, out_dir::String)
 
 Read an AMPL `.dat` file and emit one CSV per parameter/set into
 `out_dir`. The CSV format is type-dependent and pairs with
 `read_set_csv`, `read_scalar_csv`, `read_1d_csv`, `read_2d_csv`,
 `read_nd_csv` for roundtripping. The `Model`-accepting overload is a
 thin wrapper that derives a `DatSchema` from the model.
+
+`dat_path` may be a vector of `.dat` paths, in which case the merged
+data of all of them (see [`read_dat`](@ref)) lands in the one `out_dir`.
 """
-function dat_to_csv(dat_path::String, schema::DatSchema, out_dir::String)
+function dat_to_csv(
+    dat_path::Union{AbstractString,AbstractVector{<:AbstractString}},
+    schema::DatSchema,
+    out_dir::String,
+)
     isdir(out_dir) || mkpath(out_dir)
-    data = read_dat(dat_path, schema)
+    data = read_dat(_dat_paths(dat_path), schema)
     for (name, value) in data
         # `:fixes` is a Vector{FixStatement} carried alongside data
         # values — no CSV representation, and the CSV-dir path-loader
@@ -181,11 +188,33 @@ function dat_to_csv(dat_path::String, schema::DatSchema, out_dir::String)
 end
 
 function dat_to_csv(
-    dat_path::String,
+    dat_path::Union{AbstractString,AbstractVector{<:AbstractString}},
     model::JuMPConverter.Model,
     out_dir::String,
 )
     return dat_to_csv(dat_path, DatSchema(model), out_dir)
+end
+
+# A single path and a list of paths are interchangeable everywhere data
+# is loaded; normalize to the list form.
+_dat_paths(path::AbstractString) = [String(path)]
+_dat_paths(paths::AbstractVector{<:AbstractString}) = String[p for p in paths]
+
+"""
+    read_data(path, schema::DatSchema) -> Dict{Symbol, Any}
+
+Load the data for a generated `build_model`: `path` is either an AMPL
+`.dat` file, a directory of CSVs written by [`dat_to_csv`](@ref), or a
+vector mixing the two, merged in order (see [`merge_data`](@ref)).
+"""
+function read_data(
+    path::Union{AbstractString,AbstractVector{<:AbstractString}},
+    schema::DatSchema,
+)
+    return merge_data(
+        isdir(p) ? read_csv(p, schema) : read_dat(p, schema) for
+        p in _dat_paths(path)
+    )
 end
 
 # ============================================================

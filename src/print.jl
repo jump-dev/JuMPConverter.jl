@@ -360,21 +360,21 @@ function _print_inline_data_const(io::IO, model::JuMPConverter.Model)
     return
 end
 
-# Emit a single `build_model(path::String)` that hard-codes the
-# `DatSchema` derived from this model and dispatches between
-# `read_dat` (for a `.dat` file) and `read_csv` (for a directory of
-# CSVs) based on `isdir(path)`. Lets the generated `.jl` load data
-# at runtime without re-parsing the `.mod`.
+# Emit a single `build_model(path)` that hard-codes the `DatSchema`
+# derived from this model and hands it to `read_data`, which dispatches
+# between `read_dat` (for a `.dat` file) and `read_csv` (for a directory
+# of CSVs) and merges when `path` is a list — a `.mod` whose data is
+# split over several `.dat`s is loaded as `build_model([a, b])`. Lets
+# the generated `.jl` load data at runtime without re-parsing the `.mod`.
 function _print_data_loader(io::IO, model::JuMPConverter.Model)
-    println(io, "function build_model(path::String)")
+    println(
+        io,
+        "function build_model(path::Union{AbstractString,AbstractVector{<:AbstractString}})",
+    )
     print(io, "    schema = ")
     _print_schema_expr(io, model; indent = "    ")
     println(io)
-    println(io, "    data = if isdir(path)")
-    println(io, "        JuMPConverter.AMPL.read_csv(path, schema)")
-    println(io, "    else")
-    println(io, "        JuMPConverter.AMPL.read_dat(path, schema)")
-    println(io, "    end")
+    println(io, "    data = JuMPConverter.AMPL.read_data(path, schema)")
     if isempty(model.parametric_fixes)
         println(io, "    return build_model(; data...)")
         print(io, "end")

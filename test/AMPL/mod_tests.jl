@@ -1042,9 +1042,9 @@ end
 
 function test_generated_file_has_data_loader()
     # When the model has parameters/sets, `Base.show` emits the kwarg
-    # method plus a single `build_model(path::String)` that builds a
-    # `DatSchema` and dispatches between `read_dat` and `read_csv`
-    # based on `isdir(path)`. The whole file must parse as Julia.
+    # method plus a single `build_model(path)` that builds a `DatSchema`
+    # and hands it to `read_data`, which takes one `.dat`/CSV directory
+    # or a list of them. The whole file must parse as Julia.
     mod = """
     set K;
     param ALPHA {k in K} default 1.0;
@@ -1055,14 +1055,15 @@ function test_generated_file_has_data_loader()
     model = JuMPConverter.AMPL.parse_model(mod)
     rendered = sprint(print, model)
     @test contains(rendered, "function build_model(;")
-    @test contains(rendered, "function build_model(path::String)")
-    @test contains(rendered, "isdir(path)")
+    @test contains(
+        rendered,
+        "function build_model(path::Union{AbstractString,AbstractVector{<:AbstractString}})",
+    )
     @test contains(rendered, "JuMPConverter.AMPL.DatSchema(")
     @test contains(rendered, "Dict{Symbol,Int}(")
     @test contains(rendered, ":ALPHA => 1")
     @test contains(rendered, "[:K]")
-    @test contains(rendered, "JuMPConverter.AMPL.read_dat(path, schema)")
-    @test contains(rendered, "JuMPConverter.AMPL.read_csv(path, schema)")
+    @test contains(rendered, "JuMPConverter.AMPL.read_data(path, schema)")
     @test contains(rendered, "build_model(; data...)")
     @test Meta.parseall(rendered) isa Expr
     return
@@ -1080,7 +1081,7 @@ function test_no_data_loader_when_no_params_or_sets()
     model = JuMPConverter.AMPL.parse_model(mod)
     rendered = sprint(print, model)
     @test contains(rendered, "function build_model(")
-    @test !contains(rendered, "build_model(path::String)")
+    @test !contains(rendered, "build_model(path")
     @test !contains(rendered, "DatSchema")
     return
 end

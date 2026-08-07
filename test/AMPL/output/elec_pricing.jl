@@ -71,7 +71,9 @@ function build_model(;
     return model
 end
 
-function build_model(path::String)
+function build_model(
+    path::Union{AbstractString,AbstractVector{<:AbstractString}},
+)
     schema = JuMPConverter.AMPL.DatSchema(
         Dict{Symbol,Int}(
             :S => 0,
@@ -87,10 +89,6 @@ function build_model(path::String)
             :polyX => 2,
         ),
     )
-    data = if isdir(path)
-        JuMPConverter.AMPL.read_csv(path, schema)
-    else
-        JuMPConverter.AMPL.read_dat(path, schema)
-    end
+    data = JuMPConverter.AMPL.read_data(path, schema)
     return build_model(; data...)
 end

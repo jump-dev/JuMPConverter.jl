@@ -21,8 +21,10 @@ fresh anonymous module, and calls the generated `build_model`.
 
 # Arguments
 - `model_path`: path to a `.mod` (AMPL) or `.gms` (GAMS) file.
-- `dat_path`: optional path to an AMPL `.dat` file. When provided, the
-  generated `build_model(::String)` overload is invoked, which reads
+- `dat_path`: optional path to an AMPL `.dat` file, or a vector of them
+  when the data is split across several files (loaded in order, as
+  AMPL's successive `data <file>;` statements). When provided, the
+  generated `build_model(path)` overload is invoked, which reads
   the data through the embedded `DatSchema`. Mutually exclusive with
   `kwargs` (mix them by calling `build_model` directly instead).
 - `kwargs...`: forwarded to the kwarg form of `build_model` to override
@@ -30,9 +32,15 @@ fresh anonymous module, and calls the generated `build_model`.
 """
 function read_from_file(
     model_path::String,
-    dat_path::Union{Nothing,String} = nothing;
+    dat_path::Union{Nothing,AbstractString,AbstractVector{<:AbstractString}} = nothing;
     kwargs...,
 )
+    # An empty list of `.dat`s is "no data", not "load nothing from the
+    # path loader": a `.mod` with no set or parameter has no
+    # `build_model(path)` method at all, only the kwarg form.
+    if dat_path isa AbstractVector && isempty(dat_path)
+        dat_path = nothing
+    end
     if dat_path !== nothing && !isempty(kwargs)
         error(
             "Cannot pass both `dat_path` and `kwargs`; call the generated `build_model` directly to mix the two.",

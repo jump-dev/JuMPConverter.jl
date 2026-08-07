@@ -914,22 +914,23 @@ function _apply_indexed_let_default!(
 end
 
 """
-    read_model(path::AbstractString;
-               example_dat::Union{Nothing,AbstractString} = nothing) -> Model
+    read_model(path::AbstractString; example_dat = nothing) -> Model
 
 Parse an AMPL `.mod` and (optionally) an example `.dat` whose `fix`
 statements declare which variables should become tunable `fix_<…>`
-kwargs of the generated `build_model`.
+kwargs of the generated `build_model`. `example_dat` is a path or a
+vector of paths, matching what will later be handed to
+`build_model(path)`.
 
 The example `.dat`'s data values are ignored — only the `fix`
 *structure* (variable, indices, iter pattern) is kept. Runtime `.dat`
-files passed to `build_model(path::String)` may carry the same fixes
-with different values; any fix whose structure wasn't pre-registered
-this way is an error at load time.
+files passed to `build_model(path)` may carry the same fixes with
+different values; any fix whose structure wasn't pre-registered this way
+is an error at load time.
 """
 function read_model(
     path::AbstractString;
-    example_dat::Union{Nothing,AbstractString} = nothing,
+    example_dat::Union{Nothing,AbstractString,AbstractVector{<:AbstractString}} = nothing,
 )
     model = parse_model(read(path, String))
     if example_dat !== nothing
@@ -937,10 +938,17 @@ function read_model(
         # typed branch — the schemaless path mis-parses some `.dat`s
         # (e.g. portfl1.dat: floats in indexed-param values).
         schema = DatSchema(model)
-        data = parse_dat(read(example_dat, String), schema)
-        fixes = get(data, "fixes", JuMPConverter.FixStatement[])
-        for fx in fixes
-            push!(model.parametric_fixes, fx)
+        # Each fix registers one kwarg, so a fix that several of the
+        # example `.dat`s carry must be registered once — a repeated
+        # kwarg name would not be valid Julia in the emitted signature.
+        registered = Base.Set(map(fix_kwarg_name, model.parametric_fixes))
+        for dat in _dat_paths(example_dat)
+            data = parse_dat(read(dat, String), schema)
+            for fx in get(data, "fixes", JuMPConverter.FixStatement[])
+                fix_kwarg_name(fx) in registered && continue
+                push!(registered, fix_kwarg_name(fx))
+                push!(model.parametric_fixes, fx)
+            end
         end
     end
     return model

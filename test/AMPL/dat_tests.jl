@@ -523,6 +523,168 @@ function test_example1_with_model()
 end
 
 # ============================================================
+# Several `.dat` files for one `.mod`
+# ============================================================
+
+# A `.mod` whose data is split over two `.dat`s, the way MacMPEC's
+# `nash1a` needs `nash1.dat` (which populates the `InitPoints` set that
+# `nash1.mod` declares) alongside `nash1a.dat`.
+const _SPLIT_DAT_MOD = """
+set K := 1..3;
+param n;
+param ALPHA {k in K};
+var x {k in K} >= 0;
+minimize obj: sum {k in K} ALPHA[k] * x[k];
+s.t. c {k in K}: x[k] >= n;
+"""
+
+function _write_split_dats(dir)
+    mod_path = joinpath(dir, "m.mod")
+    write(mod_path, _SPLIT_DAT_MOD)
+    base = joinpath(dir, "base.dat")
+    write(base, "param n := 5;\nparam ALPHA :=\n1 1.5\n2 2.5\n3 3.5;\n")
+    # Overrides `n` and leaves `ALPHA` to the file before it.
+    over = joinpath(dir, "over.dat")
+    write(over, "param n := 9;\n")
+    return mod_path, base, over
+end
+
+function test_read_dat_merges_several_files_in_order()
+    mktempdir() do dir
+        mod_path, base, over = _write_split_dats(dir)
+        model = JuMPConverter.AMPL.read_model(mod_path)
+        data = JuMPConverter.AMPL.read_dat([base, over], model)
+        # Last file wins on `n`; `ALPHA` survives from the first.
+        @test data[:n] == 9
+        @test data[:ALPHA][1] == 1.5
+        @test data[:ALPHA][3] == 3.5
+        # Order matters, and a one-element list matches the scalar call.
+        @test JuMPConverter.AMPL.read_dat([over, base], model)[:n] == 5
+        @test JuMPConverter.AMPL.read_dat([base], model) ==
+              JuMPConverter.AMPL.read_dat(base, model)
+        @test JuMPConverter.AMPL.read_dat(String[], model) == Dict{Symbol,Any}()
+    end
+    return
+end
+
+function test_merge_data_accumulates_fixes()
+    # `fix` statements from every file are kept, unlike data values
+    # where the last file wins.
+    fx(name) = JuMPConverter.FixStatement(; variable = name, value = 1.0)
+    merged = JuMPConverter.AMPL.merge_data([
+        Dict{Symbol,Any}(:a => 1, :fixes => [fx(:x)]),
+        Dict{Symbol,Any}(:a => 2, :fixes => [fx(:y)]),
+    ])
+    @test merged[:a] == 2
+    @test [f.variable for f in merged[:fixes]] == [:x, :y]
+    # No `:fixes` key at all when no file carries one — `build_model`
+    # only pops it when the model has parametric fixes.
+    @test !haskey(
+        JuMPConverter.AMPL.merge_data([Dict{Symbol,Any}(:a => 1)]),
+        :fixes,
+    )
+    return
+end
+
+function test_read_data_mixes_dat_files_and_csv_dirs()
+    mktempdir() do dir
+        mod_path, base, over = _write_split_dats(dir)
+        model = JuMPConverter.AMPL.read_model(mod_path)
+        schema = JuMPConverter.AMPL.DatSchema(model)
+        csv_dir = joinpath(dir, "csvs")
+        JuMPConverter.AMPL.dat_to_csv(base, schema, csv_dir)
+        # A CSV directory and a `.dat` are interchangeable entries.
+        data = JuMPConverter.AMPL.read_data([csv_dir, over], schema)
+        @test data[:n] == 9
+        @test data[:ALPHA][2] == 2.5
+        # A bare path behaves like the one-element list.
+        @test JuMPConverter.AMPL.read_data(base, schema) ==
+              JuMPConverter.AMPL.read_data([base], schema)
+    end
+    return
+end
+
+function test_dat_to_csv_from_several_dat_files()
+    mktempdir() do dir
+        mod_path, base, over = _write_split_dats(dir)
+        model = JuMPConverter.AMPL.read_model(mod_path)
+        csv_dir = joinpath(dir, "csvs")
+        JuMPConverter.AMPL.dat_to_csv([base, over], model, csv_dir)
+        @test JuMPConverter.AMPL.read_scalar_csv(joinpath(csv_dir, "n.csv")) ==
+              9
+        @test JuMPConverter.AMPL.read_1d_csv(joinpath(csv_dir, "ALPHA.csv"))[3] ==
+              3.5
+    end
+    return
+end
+
+function test_generated_build_model_takes_a_list_of_paths()
+    mktempdir() do dir
+        mod_path, base, over = _write_split_dats(dir)
+        model = JuMPConverter.AMPL.read_model(mod_path)
+        rendered = sprint(print, model)
+        @test contains(rendered, "JuMPConverter.AMPL.read_data(path, schema)")
+        @test Meta.parseall(rendered) isa Expr
+        jump_model = JuMPConverter.read_from_file(mod_path, [base, over])
+        @test jump_model isa JuMP.Model
+        # `n` comes from the second file, so the `c` constraints read
+        # `x[k] >= 9`.
+        @test JuMP.normalized_rhs(jump_model[:c][1]) == 9
+        # A single path still works, and gives the first file's `n`.
+        @test JuMP.normalized_rhs(
+            JuMPConverter.read_from_file(mod_path, base)[:c][1],
+        ) == 5
+    end
+    return
+end
+
+function test_read_from_file_treats_empty_dat_list_as_no_data()
+    # `MacMPEC.dat_paths` returns `String[]` for a self-contained
+    # `.mod`; that must reach the kwarg form of `build_model`, since a
+    # `.mod` with no set or parameter has no path-loading method at all.
+    mod = """
+    var x >= 0;
+    minimize obj: x;
+    s.t. c: x >= 1;
+    """
+    mktempdir() do dir
+        mod_path = joinpath(dir, "m.mod")
+        write(mod_path, mod)
+        @test JuMPConverter.read_from_file(mod_path, String[]) isa JuMP.Model
+    end
+    return
+end
+
+function test_example_dat_registers_fixes_from_every_file()
+    # `read_model(...; example_dat = [a, b])` registers a `fix_<…>`
+    # kwarg per distinct fix across the files, and a fix both files
+    # carry only once — a repeated kwarg name would not parse.
+    mod = """
+    var x >= 0;
+    var y >= 0;
+    param n;
+    minimize obj: x + y;
+    s.t. c: x + y >= n;
+    """
+    mktempdir() do dir
+        mod_path = joinpath(dir, "m.mod")
+        write(mod_path, mod)
+        a = joinpath(dir, "a.dat")
+        write(a, "param n := 1;\nfix x := 2;\n")
+        b = joinpath(dir, "b.dat")
+        write(b, "fix x := 3;\nfix y := 4;\n")
+        model = JuMPConverter.AMPL.read_model(mod_path; example_dat = [a, b])
+        names = map(JuMPConverter.AMPL.fix_kwarg_name, model.parametric_fixes)
+        @test names == [:fix_x, :fix_y]
+        @test Meta.parseall(sprint(print, model)) isa Expr
+        jump_model = JuMPConverter.read_from_file(mod_path, [a, b])
+        @test JuMP.fix_value(jump_model[:x]) == 3
+        @test JuMP.fix_value(jump_model[:y]) == 4
+    end
+    return
+end
+
+# ============================================================
 # CSV export / import (dat_to_csv + read_*_csv)
 # ============================================================
 
