@@ -935,7 +935,7 @@ function test_set_declaration()
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "build_model(; PRODUCTS = JuMPConverter.AMPL.Unset{:PRODUCTS}(), MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0, length(PRODUCTS)), PRODUCTS))",
+        "build_model(; PRODUCTS = JuMPConverter.AMPL.Unset(:PRODUCTS), MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0, length(PRODUCTS)), PRODUCTS))",
     )
     return
 end
@@ -958,7 +958,7 @@ function test_set_with_default_is_optional_kwarg()
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "build_model(; T = JuMPConverter.AMPL.Unset{:T}(), N = 1:2)",
+        "build_model(; T = JuMPConverter.AMPL.Unset(:T), N = 1:2)",
     )
     return
 end
@@ -1808,9 +1808,11 @@ end
 
 function test_unset_kwarg_sentinel_for_required_data()
     # A set/param with no `.mod` default and no data-section value
-    # defaults to an `Unset{:name}` sentinel rather than a bare required
+    # defaults to an `Unset(:name)` sentinel rather than a bare required
     # kwarg — so `build_model()` can be called even when a declared-but-
     # unused item (robot's `rho_0`, nash's `InitPoints`) isn't supplied.
+    # The name is a field (one concrete `Unset` type), not a type
+    # parameter, so `build_model` isn't specialized per parameter name.
     mod = """
     set S;
     param p;
@@ -1821,14 +1823,16 @@ function test_unset_kwarg_sentinel_for_required_data()
     """
     model = JuMPConverter.AMPL.parse_model(mod)
     rendered = sprint(print, model)
-    @test contains(rendered, "S = JuMPConverter.AMPL.Unset{:S}()")
-    @test contains(rendered, "p = JuMPConverter.AMPL.Unset{:p}()")
-    @test contains(rendered, "q = JuMPConverter.AMPL.Unset{:q}()")
+    @test contains(rendered, "S = JuMPConverter.AMPL.Unset(:S)")
+    @test contains(rendered, "p = JuMPConverter.AMPL.Unset(:p)")
+    @test contains(rendered, "q = JuMPConverter.AMPL.Unset(:q)")
     @test Meta.parseall(rendered) isa Expr
-    # The sentinel supports no operations, so an unused one is harmless
-    # while any real use throws (naming the item in the error type).
-    @test JuMPConverter.AMPL.Unset{:p}() isa JuMPConverter.AMPL.Unset
-    @test_throws MethodError 2.0 * JuMPConverter.AMPL.Unset{:p}()
+    # Unused ⇒ harmless; indexing/iterating a used one throws a clear
+    # error naming it; other uses give a plain `MethodError`.
+    @test JuMPConverter.AMPL.Unset(:p) isa JuMPConverter.AMPL.Unset
+    @test_throws ErrorException JuMPConverter.AMPL.Unset(:q)[1]
+    @test_throws ErrorException collect(JuMPConverter.AMPL.Unset(:S))
+    @test_throws MethodError 2.0 * JuMPConverter.AMPL.Unset(:p)
     return
 end
 

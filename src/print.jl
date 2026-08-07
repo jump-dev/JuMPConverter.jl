@@ -204,10 +204,10 @@ end
 # supplied by the `.dat` at build time. Rather than a bare required
 # keyword (which Julia errors on when omitted, even if the model never
 # uses it — MacMPEC's vestigial `InitPoints`/`rho_0`), default it to an
-# `Unset{:name}` sentinel: unused ⇒ harmless, used ⇒ a `MethodError`
-# whose type names the missing value. `build_model(path)` populates real
-# values, so the sentinel only ever survives for genuinely-unset data.
-_unset_kwarg(name) = "$name = JuMPConverter.AMPL.Unset{:$name}()"
+# `Unset(:name)` sentinel: unused ⇒ harmless, used ⇒ a clear error naming
+# it. `build_model(path)` populates real values, so the sentinel only
+# ever survives for genuinely-unset data.
+_unset_kwarg(name) = "$name = JuMPConverter.AMPL.Unset(:$name)"
 
 function _format_set_kwarg(s::Set, inline::Bool)
     if inline

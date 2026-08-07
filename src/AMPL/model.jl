@@ -297,9 +297,11 @@ end
 
 # Cover the common data-access patterns (indexing a parameter, iterating
 # a set) with a named error. Only reached when a genuinely-unset value is
-# used, so this never touches a normally-built model.
+# used, so this never touches a normally-built model. `SizeUnknown` routes
+# `collect`/comprehensions through `iterate` rather than `length`.
 Base.getindex(u::Unset, ::Any...) = _unset_used(u)
 Base.iterate(u::Unset, ::Any...) = _unset_used(u)
+Base.IteratorSize(::Type{Unset}) = Base.SizeUnknown()
 
 # A single axis' set expression as Julia source: brace literals become
 # vectors (ex4_160's `sum{k in {-1,1}}` — Julia's `{}` vector syntax is
