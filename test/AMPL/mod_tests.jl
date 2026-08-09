@@ -1801,6 +1801,30 @@ function test_recursive_param_default_sequential_fill()
     return
 end
 
+function test_defaulted_param_wrapped_with_default()
+    # hs044-i-style `param A{J,I} default 0;` populated sparsely (`.`
+    # entries) — the model accesses every (j,i), so the emitter wraps
+    # the defaulted indexed param so a missing key returns the default.
+    mod = """
+    set I := 1..2;
+    set J := 1..2;
+    param A {J,I} default 0;
+    var x {I} >= 0;
+    minimize obj: sum {i in I} x[i];
+    s.t. c {j in J}: sum {i in I} A[j,i] * x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "A = JuMPConverter.AMPL.with_default(A, 0)")
+    @test Meta.parseall(rendered) isa Expr
+    # The shim returns the default for a missing key and the value for a
+    # present one.
+    wrapped = JuMPConverter.AMPL.with_default(Dict((1, 1) => 7.0), 0)
+    @test wrapped[1, 1] == 7.0
+    @test wrapped[2, 2] == 0
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()

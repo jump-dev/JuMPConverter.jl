@@ -3,14 +3,18 @@ import MacMPEC
 import JuMPConverter
 
 # Instances whose `read_from_file` round-trip currently fails.
-# These fall into three categories:
+# These fall into two categories:
 #
 #   1. `.dat` files that don't actually populate a required `set`/`param`
 #      because the original AMPL script generated the data via a loop
 #      we don't evaluate (`nash1a`–`nash1e` lack `InitPoints`).
-#   2. Models that lean on AMPL's lazy / defaulted indexing semantics
-#      where JuMP requires every accessed key to exist (`siouxfls*`,
-#      `tap-09/15`, `monteiro*`, `water-*`, `hs044-i`, `ralphmod`).
+#   2. Models indexed over a set of tuples (arcs) where a param/variable
+#      is accessed at a tuple outside its domain — `siouxfls*`,
+#      `tap-09/15`, `monteiro*`, `water-*` key by `(i, j)` arcs, and
+#      `ralphmod` accesses a `{state}` variable off its index set. AMPL's
+#      lazy indexing tolerates this; JuMP requires the key to exist.
+#      (The simpler defaulted-scalar-index case, hs044-i, is handled by
+#      `JuMPConverter.AMPL.with_default`.)
 #
 # Wrapping them in `@test_broken` lets `Pkg.test()` stay green: a real
 # regression that newly breaks one of the currently-passing instances
@@ -18,7 +22,6 @@ import JuMPConverter
 # the corresponding `@test_broken` to a "@test passed unexpectedly"
 # failure so we know to delete it.
 const BROKEN_BUILD = Set([
-    "hs044-i",
     "monteiro",
     "monteiroB",
     "nash1a",

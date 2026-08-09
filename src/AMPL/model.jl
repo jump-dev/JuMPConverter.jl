@@ -265,6 +265,29 @@ function _boolify_condition(cond::AbstractString)
     return "($c) != 0"
 end
 
+# AMPL parameters declared with `default V` return `V` for any index the
+# `.dat` leaves unset — `param A{J,I} default 0;` populated with `.`
+# entries (hs044-i, siouxfls). JuMP containers throw on a missing key
+# instead, so the generated `build_model` wraps every defaulted indexed
+# parameter in this shim, which falls back to the default on a
+# `KeyError`/`BoundsError`. The underlying container (`SparseAxisArray`,
+# `DenseAxisArray`, `Array`, `Dict`, scalar) is left untouched otherwise.
+struct DefaultArray{D,T}
+    data::D
+    default::T
+end
+
+with_default(data, default) = DefaultArray(data, default)
+
+function Base.getindex(a::DefaultArray, idx...)
+    try
+        return a.data[idx...]
+    catch err
+        (err isa KeyError || err isa BoundsError) && return a.default
+        rethrow()
+    end
+end
+
 # A single axis' set expression as Julia source: brace literals become
 # vectors (ex4_160's `sum{k in {-1,1}}` — Julia's `{}` vector syntax is
 # discontinued), `A..B [by S]` ranges become `A:B` / `A:S:B`, and range
