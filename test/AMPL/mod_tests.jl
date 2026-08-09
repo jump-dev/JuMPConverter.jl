@@ -1801,6 +1801,53 @@ function test_recursive_param_default_sequential_fill()
     return
 end
 
+function test_defaulted_param_wrapped_with_default()
+    # hs044-i-style `param A{J,I} default 0;` populated sparsely (`.`
+    # entries) — the model accesses every (j,i), so the emitter wraps
+    # the defaulted indexed param so a missing key returns the default.
+    mod = """
+    set I := 1..2;
+    set J := 1..2;
+    param A {J,I} default 0;
+    var x {I} >= 0;
+    minimize obj: sum {i in I} x[i];
+    s.t. c {j in J}: sum {i in I} A[j,i] * x[i] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "A = JuMPConverter.AMPL.with_default(A, 0)")
+    @test Meta.parseall(rendered) isa Expr
+    # The shim returns the default for a missing key and the value for a
+    # present one.
+    wrapped = JuMPConverter.AMPL.with_default(Dict((1, 1) => 7.0), 0)
+    @test wrapped[1, 1] == 7.0
+    @test wrapped[2, 2] == 0
+    return
+end
+
+function test_bare_tuple_set_index_expanded()
+    # tollmpec-style: `var F{ARCS}` where `set ARCS within (N cross N)`
+    # is a set of 2-tuples. A bare index must be emitted as a
+    # destructuring generator so JuMP builds a 2-D `SparseAxisArray`
+    # that `F[i, j]` can index — not a 1-D container over whole tuples.
+    # An index that already destructures (`{(i, j) in ARCS}`) is left
+    # as is.
+    mod = """
+    set N := 1..3;
+    set ARCS within (N cross N);
+    var F {ARCS};
+    minimize obj: sum {(i,j) in ARCS} F[i,j];
+    s.t. c {(i,j) in ARCS}: F[i,j] >= 0;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    @test model.sets["ARCS"].dimension == 2
+    rendered = sprint(print, model)
+    @test contains(rendered, "@variable(model, F[(_i1, _i2) in ARCS])")
+    @test contains(rendered, "@constraint(model, c[(i, j) in ARCS],")
+    @test Meta.parseall(rendered) isa Expr
+    return
+end
+
 end  # module
 
 TestModParsing.runtests()
