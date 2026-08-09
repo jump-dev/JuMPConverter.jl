@@ -929,11 +929,13 @@ function test_set_declaration()
     @test haskey(model.sets, "PRODUCTS")
     @test haskey(model.sets, "MACHINES")
     # Sets must appear in the build_model keyword args so that splatting
-    # `read_dat` output works.
+    # `read_dat` output works. A set with no `.mod` default gets an
+    # `Unset` sentinel default (so an unused one doesn't force the caller
+    # to pass it).
     rendered = sprint(print, model)
     @test contains(
         rendered,
-        "build_model(; PRODUCTS, MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0, length(PRODUCTS)), PRODUCTS))",
+        "build_model(; PRODUCTS = JuMPConverter.AMPL.Unset(:PRODUCTS), MACHINES = 1:5, cost = JuMP.Containers.DenseAxisArray(fill(0, length(PRODUCTS)), PRODUCTS))",
     )
     return
 end
@@ -954,7 +956,10 @@ function test_set_with_default_is_optional_kwarg()
     @test model.sets["N"].default == "1:2"
     @test model.sets["T"].default === nothing
     rendered = sprint(print, model)
-    @test contains(rendered, "build_model(; T, N = 1:2)")
+    @test contains(
+        rendered,
+        "build_model(; T = JuMPConverter.AMPL.Unset(:T), N = 1:2)",
+    )
     return
 end
 
@@ -1798,6 +1803,36 @@ function test_recursive_param_default_sequential_fill()
     @test contains(rendered, "B[i] = ")
     @test !contains(rendered, "for i in 0:K], 0:K)")  # not a comprehension
     @test Meta.parseall(rendered) isa Expr
+    return
+end
+
+function test_unset_kwarg_sentinel_for_required_data()
+    # A set/param with no `.mod` default and no data-section value
+    # defaults to an `Unset(:name)` sentinel rather than a bare required
+    # kwarg — so `build_model()` can be called even when a declared-but-
+    # unused item (robot's `rho_0`, nash's `InitPoints`) isn't supplied.
+    # The name is a field (one concrete `Unset` type), not a type
+    # parameter, so `build_model` isn't specialized per parameter name.
+    mod = """
+    set S;
+    param p;
+    param q {S};
+    var x >= 0;
+    minimize obj: x;
+    s.t. c: x >= 1;
+    """
+    model = JuMPConverter.AMPL.parse_model(mod)
+    rendered = sprint(print, model)
+    @test contains(rendered, "S = JuMPConverter.AMPL.Unset(:S)")
+    @test contains(rendered, "p = JuMPConverter.AMPL.Unset(:p)")
+    @test contains(rendered, "q = JuMPConverter.AMPL.Unset(:q)")
+    @test Meta.parseall(rendered) isa Expr
+    # Unused ⇒ harmless; indexing/iterating a used one throws a clear
+    # error naming it; other uses give a plain `MethodError`.
+    @test JuMPConverter.AMPL.Unset(:p) isa JuMPConverter.AMPL.Unset
+    @test_throws ErrorException JuMPConverter.AMPL.Unset(:q)[1]
+    @test_throws ErrorException collect(JuMPConverter.AMPL.Unset(:S))
+    @test_throws MethodError 2.0 * JuMPConverter.AMPL.Unset(:p)
     return
 end
 
