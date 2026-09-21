@@ -11,7 +11,7 @@ MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 
 [compat]
-CSV = "0.10"
+CSV = "0.10, 1.0"
 DataFrames = "1.7"
 JuMP = "1.29.3"
 MathOptInterface = "1.48.0"
